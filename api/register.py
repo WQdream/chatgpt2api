@@ -22,6 +22,11 @@ class RegisterConfigRequest(BaseModel):
     check_interval: int | None = None
 
 
+class FreemailDomainsRequest(BaseModel):
+    api_base: str
+    jwt_token: str
+
+
 def create_router() -> APIRouter:
     router = APIRouter()
 
@@ -64,5 +69,40 @@ def create_router() -> APIRouter:
                 await asyncio.sleep(0.5)
 
         return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @router.post("/api/register/freemail/domains")
+    async def fetch_freemail_domains(body: FreemailDomainsRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        api_base = body.api_base.strip().rstrip("/")
+        jwt_token = body.jwt_token.strip()
+        if not api_base:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=400, detail={"error": "api_base is required"})
+        if not jwt_token:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=400, detail={"error": "jwt_token is required"})
+        from curl_cffi import requests as curl_requests
+        session = curl_requests.Session(impersonate="chrome", verify=False)
+        try:
+            resp = session.get(
+                f"{api_base}/api/domains",
+                headers={"Authorization": f"Bearer {jwt_token}", "Accept": "application/json"},
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                from fastapi import HTTPException
+                raise HTTPException(status_code=502, detail={"error": f"Freemail 返回 HTTP {resp.status_code}: {resp.text[:200]}"})
+            data = resp.json()
+            if not isinstance(data, list):
+                from fastapi import HTTPException
+                raise HTTPException(status_code=502, detail={"error": "Freemail 返回格式异常，期望域名数组"})
+            return {"domains": [str(item).strip() for item in data if str(item).strip()]}
+        except Exception as exc:
+            if hasattr(exc, "status_code"):
+                raise
+            from fastapi import HTTPException
+            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+        finally:
+            session.close()
 
     return router

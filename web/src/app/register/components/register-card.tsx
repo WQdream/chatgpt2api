@@ -1,6 +1,7 @@
 "use client";
 
-import { AlertTriangle, LoaderCircle, Plus, Play, RotateCcw, Save, Square, Trash2, UserPlus } from "lucide-react";
+import { useState } from "react";
+import { AlertTriangle, Eye, EyeOff, LoaderCircle, Plus, Play, RotateCcw, Save, Square, Trash2, UserPlus, X } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -8,8 +9,155 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { fetchFreemailDomains } from "@/lib/api";
+import { toast } from "sonner";
 
 import { useSettingsStore } from "../../settings/store";
+
+function FreemailConfig({
+  provider,
+  index,
+  updateProvider,
+  disabled,
+}: {
+  provider: Record<string, unknown>;
+  index: number;
+  updateProvider: (index: number, updates: Record<string, unknown>) => void;
+  disabled: boolean;
+}) {
+  const [showToken, setShowToken] = useState(false);
+  const [fetchingDomains, setFetchingDomains] = useState(false);
+  const [remoteDomains, setRemoteDomains] = useState<string[]>([]);
+  const [showDomainPicker, setShowDomainPicker] = useState(false);
+
+  const selectedDomains: string[] = Array.isArray(provider.domain) ? provider.domain.map(String) : [];
+  const domainIndexMap: Record<string, number> = (provider.domain_index_map as Record<string, number>) || {};
+
+  const handleFetchDomains = async () => {
+    const apiBase = String(provider.api_base || "").trim();
+    const jwtToken = String(provider.jwt_token || "").trim();
+    if (!apiBase) {
+      toast.error("请先填写 API Base");
+      return;
+    }
+    if (!jwtToken) {
+      toast.error("请先填写 JWT Token");
+      return;
+    }
+    setFetchingDomains(true);
+    try {
+      const data = await fetchFreemailDomains(apiBase, jwtToken);
+      setRemoteDomains(data.domains);
+      setShowDomainPicker(true);
+      toast.success(`获取到 ${data.domains.length} 个域名`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "获取域名失败";
+      toast.error(message);
+    } finally {
+      setFetchingDomains(false);
+    }
+  };
+
+  const toggleDomain = (domain: string, domainIdx: number, checked: boolean) => {
+    const nextDomains = checked
+      ? [...selectedDomains.filter((d) => d !== domain), domain]
+      : selectedDomains.filter((d) => d !== domain);
+    const nextMap = { ...domainIndexMap };
+    if (checked) {
+      nextMap[domain] = domainIdx;
+    } else {
+      delete nextMap[domain];
+    }
+    updateProvider(index, { domain: nextDomains, domain_index_map: nextMap });
+  };
+
+  const removeDomain = (domain: string) => {
+    const nextDomains = selectedDomains.filter((d) => d !== domain);
+    const nextMap = { ...domainIndexMap };
+    delete nextMap[domain];
+    updateProvider(index, { domain: nextDomains, domain_index_map: nextMap });
+  };
+
+  return (
+    <>
+      <div className="space-y-2">
+        <label className="text-sm text-stone-700">API Base</label>
+        <Input
+          value={String(provider.api_base || "")}
+          onChange={(event) => updateProvider(index, { api_base: event.target.value })}
+          placeholder="https://mailfree.example.workers.dev"
+          className="h-10 rounded-xl border-stone-200 bg-white"
+          disabled={disabled}
+        />
+      </div>
+      <div className="space-y-2">
+        <label className="text-sm text-stone-700">JWT Token</label>
+        <div className="relative">
+          <Input
+            type={showToken ? "text" : "password"}
+            value={String(provider.jwt_token || "")}
+            onChange={(event) => updateProvider(index, { jwt_token: event.target.value })}
+            placeholder="Freemail 超管令牌"
+            className="h-10 rounded-xl border-stone-200 bg-white pr-10"
+            disabled={disabled}
+          />
+          <button
+            type="button"
+            className="absolute top-1/2 right-3 -translate-y-1/2 text-stone-400 hover:text-stone-700"
+            onClick={() => setShowToken(!showToken)}
+          >
+            {showToken ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+          </button>
+        </div>
+      </div>
+      <div className="space-y-2 md:col-span-2">
+        <div className="flex items-center justify-between">
+          <label className="text-sm text-stone-700">注册域名</label>
+          <Button
+            type="button"
+            variant="outline"
+            className="h-8 rounded-lg border-stone-200 bg-white px-3 text-xs"
+            onClick={() => void handleFetchDomains()}
+            disabled={disabled || fetchingDomains}
+          >
+            {fetchingDomains ? <LoaderCircle className="size-3 animate-spin" /> : null}
+            获取域名
+          </Button>
+        </div>
+        {selectedDomains.length > 0 ? (
+          <div className="flex flex-wrap gap-1.5">
+            {selectedDomains.map((domain) => (
+              <span key={domain} className="inline-flex items-center gap-1 rounded-md bg-stone-100 px-2 py-1 text-xs text-stone-700">
+                {domain}
+                {!disabled ? (
+                  <button type="button" className="text-stone-400 hover:text-stone-700" onClick={() => removeDomain(domain)}>
+                    <X className="size-3" />
+                  </button>
+                ) : null}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-stone-400">尚未选择域名，请点击"获取域名"后多选。</p>
+        )}
+        {showDomainPicker && remoteDomains.length > 0 ? (
+          <div className="max-h-48 space-y-1 overflow-y-auto rounded-xl border border-stone-200 bg-white p-3">
+            {remoteDomains.map((domain, domainIdx) => (
+              <label key={domain} className="flex items-center gap-2 text-xs text-stone-700">
+                <Checkbox
+                  checked={selectedDomains.includes(domain)}
+                  onCheckedChange={(checked) => toggleDomain(domain, domainIdx, Boolean(checked))}
+                  disabled={disabled}
+                />
+                {domain}
+              </label>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </>
+  );
+}
 
 export function RegisterCard() {
   const config = useSettingsStore((state) => state.registerConfig);
@@ -56,6 +204,7 @@ export function RegisterCard() {
       ...(type === "gptmail" ? { api_key: "", default_domain: "" } : {}),
       ...(type === "yyds_mail" ? { api_base: "https://maliapi.215.im/v1", api_key: "", domain: [], subdomain: "", wildcard: false } : {}),
       ...(type === "ddg_mail" ? { ddg_token: "", cf_inbox_jwt: "", cf_domain: [], admin_password: "" } : {}),
+      ...(type === "freemail" ? { api_base: "", jwt_token: "", domain: [], domain_index_map: {} } : {}),
     });
   };
 
@@ -178,6 +327,7 @@ export function RegisterCard() {
                             <SelectItem value="gptmail">gptmail(未测试)</SelectItem>
                             <SelectItem value="yyds_mail">yyds_mail</SelectItem>
                             <SelectItem value="ddg_mail">ddg_mail (DDG邮箱+CF中转)</SelectItem>
+                            <SelectItem value="freemail">freemail</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
@@ -257,6 +407,9 @@ export function RegisterCard() {
                             Wildcard
                           </label>
                         </>
+                      ) : null}
+                      {type === "freemail" ? (
+                        <FreemailConfig provider={provider} index={index} updateProvider={updateProvider} disabled={config.enabled} />
                       ) : null}
                     </div>
 

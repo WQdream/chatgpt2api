@@ -639,6 +639,13 @@ export async function resetRegister() {
   return httpRequest<{ register: RegisterConfig }>("/api/register/reset", { method: "POST" });
 }
 
+export async function fetchFreemailDomains(apiBase: string, jwtToken: string) {
+  return httpRequest<{ domains: string[] }>("/api/register/freemail/domains", {
+    method: "POST",
+    body: { api_base: apiBase, jwt_token: jwtToken },
+  });
+}
+
 // ── CPA (CLIProxyAPI) ──────────────────────────────────────────────
 
 export type CPAPool = {

@@ -936,10 +936,90 @@ def _next_entry(mail_config: dict) -> dict:
         return value
 
 
+class FreemailProvider(BaseMailProvider):
+    name = "freemail"
+
+    def __init__(self, entry: dict, conf: dict):
+        super().__init__(conf, str(entry.get("provider_ref") or ""))
+        self.api_base = str(entry.get("api_base") or "").rstrip("/")
+        self.jwt_token = str(entry.get("jwt_token") or "").strip()
+        self.domain = _normalize_string_list(entry.get("domain"))
+        self.domain_index_map: dict[str, int] = entry.get("domain_index_map") or {}
+        self.session = curl_requests.Session(impersonate="chrome")
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.jwt_token}"}
+
+    def _request(self, method: str, path: str, params: dict | None = None, expected: tuple[int, ...] = (200,)):
+        resp = self.session.request(
+            method.upper(),
+            f"{self.api_base}{path}",
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": self.conf["user_agent"],
+                **self._auth_headers(),
+            },
+            params=params,
+            timeout=self.conf["request_timeout"],
+            verify=False,
+        )
+        if resp.status_code not in expected:
+            raise RuntimeError(f"Freemail 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
+        return resp.json()
+
+    def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
+        if not self.domain:
+            raise RuntimeError("Freemail 需要至少配置一个 domain")
+        if not self.api_base:
+            raise RuntimeError("Freemail 缺少 api_base")
+        if not self.jwt_token:
+            raise RuntimeError("Freemail 缺少 jwt_token")
+        chosen_domain = random.choice(self.domain)
+        domain_index = self.domain_index_map.get(chosen_domain)
+        if domain_index is None:
+            raise RuntimeError(f"Freemail 域名 {chosen_domain} 缺少 domain_index_map 映射，请重新获取域名")
+        data = self._request("GET", "/api/generate", params={"length": 8, "domainIndex": domain_index})
+        address = str(data.get("email") or "").strip()
+        if not address:
+            raise RuntimeError(f"Freemail 生成邮箱失败: {data}")
+        return {"provider": self.name, "provider_ref": self.provider_ref, "address": address, "label": "freemail"}
+
+    def fetch_latest_message(self, mailbox: dict[str, Any]) -> dict[str, Any] | None:
+        address = str(mailbox.get("address") or "").strip()
+        if not address:
+            raise RuntimeError("Freemail 缺少 address")
+        data = self._request("GET", "/api/emails", params={"mailbox": address, "limit": 5})
+        items = data if isinstance(data, list) else []
+        messages = [item for item in items if isinstance(item, dict)]
+        if not messages:
+            return None
+        item = messages[0]
+        verification_code = str(item.get("verification_code") or "").strip()
+        text_content = str(item.get("content") or item.get("text_content") or "")
+        html_content = str(item.get("html_content") or "")
+        result: dict[str, Any] = {
+            "provider": self.name,
+            "mailbox": address,
+            "message_id": str(item.get("id") or ""),
+            "subject": str(item.get("subject") or ""),
+            "sender": str(item.get("sender") or item.get("from") or ""),
+            "text_content": text_content if not verification_code else f"Your verification code is {verification_code}\n{text_content}",
+            "html_content": html_content,
+            "received_at": _parse_received_at(item.get("received_at") or item.get("createdAt") or item.get("date")),
+            "raw": item,
+        }
+        return result
+
+    def close(self) -> None:
+        self.session.close()
+
+
 def _create_provider(mail_config: dict, provider: str = "", provider_ref: str = "") -> BaseMailProvider:
     entry = next((dict(item) for item in _entries(mail_config) if provider_ref and item["provider_ref"] == provider_ref), None)
     entry = entry or next((dict(item) for item in _enabled_entries(mail_config) if provider and item["type"] == provider), None) or _next_entry(mail_config)
     conf = _config(mail_config)
+    if entry["type"] == "freemail":
+        return FreemailProvider(entry, conf)
     if entry["type"] == "cloudmail_gen":
         return CloudMailGenProvider(entry, conf)
     if entry["type"] == "cloudflare_temp_email":
