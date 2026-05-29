@@ -181,7 +181,11 @@ def list_remote_files(pool: dict) -> list[dict]:
     return items
 
 
-def fetch_remote_access_token(pool: dict, file_name: str) -> tuple[str | None, str | None]:
+def _payload_access_token(payload: dict) -> str:
+    return str(payload.get("access_token") or payload.get("accessToken") or "").strip()
+
+
+def fetch_remote_account_payload(pool: dict, file_name: str) -> tuple[dict | None, str | None]:
     base_url = str(pool.get("base_url") or "").strip()
     secret_key = str(pool.get("secret_key") or "").strip()
     file_name = str(file_name or "").strip()
@@ -203,10 +207,13 @@ def fetch_remote_access_token(pool: dict, file_name: str) -> tuple[str | None, s
     if not isinstance(payload, dict):
         return None, "invalid payload"
 
-    access_token = str(payload.get("access_token") or "").strip()
+    access_token = _payload_access_token(payload)
     if not access_token:
         return None, "missing access_token"
-    return access_token, None
+    account = dict(payload)
+    account["access_token"] = access_token
+    account.pop("accessToken", None)
+    return account, None
 
 
 class CPAImportService:
@@ -267,19 +274,19 @@ class CPAImportService:
     def _run_import(self, pool_id: str, pool: dict, names: list[str]) -> None:
         self._update_job(pool_id, status="running")
 
-        tokens: list[str] = []
+        account_payloads: list[dict] = []
         max_workers = min(16, max(1, len(names)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {executor.submit(fetch_remote_access_token, pool, name): name for name in names}
+            future_map = {executor.submit(fetch_remote_account_payload, pool, name): name for name in names}
             for future in as_completed(future_map):
                 file_name = future_map[future]
                 try:
-                    token, error = future.result()
+                    account, error = future.result()
                 except Exception as exc:
-                    token, error = None, str(exc)
+                    account, error = None, str(exc)
 
-                if token:
-                    tokens.append(token)
+                if account:
+                    account_payloads.append(account)
                 else:
                     self._append_error(pool_id, file_name, error or "unknown error")
 
@@ -287,7 +294,7 @@ class CPAImportService:
                 failed = len(current.get("errors") or [])
                 self._update_job(pool_id, completed=int(current.get("completed") or 0) + 1, failed=failed)
 
-        if not tokens:
+        if not account_payloads:
             current = self._config.get_import_job(pool_id) or {}
             self._update_job(
                 pool_id,
@@ -297,7 +304,8 @@ class CPAImportService:
             )
             return
 
-        add_result = account_service.add_accounts(tokens)
+        tokens = [_payload_access_token(item) for item in account_payloads]
+        add_result = account_service.add_account_items(account_payloads)
         refresh_result = account_service.refresh_accounts(tokens)
         current = self._config.get_import_job(pool_id) or {}
         self._update_job(

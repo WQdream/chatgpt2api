@@ -238,11 +238,46 @@ def _auth_headers(server: dict) -> dict[str, str]:
 def _extract_access_token(credentials: object) -> str:
     if not isinstance(credentials, dict):
         return ""
+    token_map = credentials.get("token") if isinstance(credentials.get("token"), dict) else {}
+    token_map = token_map if isinstance(token_map, dict) else {}
     for key in ("access_token", "accessToken", "token"):
-        value = _clean(credentials.get(key))
+        value = _clean(credentials.get(key)) if key != "token" or not token_map else ""
+        if not value and token_map:
+            value = _clean(token_map.get(key))
         if value:
             return value
     return ""
+
+
+def _credential_value(credentials: dict, *keys: str) -> str:
+    token_map = credentials.get("token") if isinstance(credentials.get("token"), dict) else {}
+    token_map = token_map if isinstance(token_map, dict) else {}
+    for key in keys:
+        value = _clean(credentials.get(key))
+        if not value and token_map:
+            value = _clean(token_map.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _extract_account_payload(account: dict, credentials: dict) -> dict:
+    access_token = _extract_access_token(credentials)
+    if not access_token:
+        raise RuntimeError("missing access_token")
+    account_id = account.get("id")
+    payload = {
+        "access_token": access_token,
+        "email": _clean(credentials.get("email")) or _clean(account.get("name")),
+        "account_id": _clean(credentials.get("chatgpt_account_id")) or (str(account_id) if account_id is not None else ""),
+        "plan_type": _clean(credentials.get("plan_type")),
+        "refresh_token": _credential_value(credentials, "refresh_token", "refreshToken"),
+        "id_token": _credential_value(credentials, "id_token", "idToken"),
+        "client_id": _credential_value(credentials, "client_id", "clientId"),
+        "expired": _credential_value(credentials, "expired", "expires_at", "expiresAt"),
+        "last_refresh": _credential_value(credentials, "last_refresh", "lastRefresh"),
+    }
+    return {key: value for key, value in payload.items() if value not in ("", None)}
 
 
 def _unwrap_envelope(payload: object) -> object:
@@ -387,8 +422,8 @@ def list_remote_groups(server: dict) -> list[dict]:
     return items
 
 
-def _fetch_access_token_for_account(server: dict, account_id: str) -> tuple[str, dict]:
-    """Return (access_token, account_meta) for a single sub2api account id."""
+def _fetch_account_payload_for_account(server: dict, account_id: str) -> dict:
+    """Return a local account payload for a single sub2api account id."""
     base_url = _clean(server.get("base_url"))
     headers = _auth_headers(server)
 
@@ -409,13 +444,7 @@ def _fetch_access_token_for_account(server: dict, account_id: str) -> tuple[str,
     if not isinstance(account, dict):
         account = payload if isinstance(payload, dict) else {}
     credentials = account.get("credentials") if isinstance(account.get("credentials"), dict) else {}
-    access_token = _extract_access_token(credentials)
-    if not access_token:
-        raise RuntimeError("missing access_token")
-    return access_token, {
-        "email": _clean(credentials.get("email")),
-        "plan_type": _clean(credentials.get("plan_type")),
-    }
+    return _extract_account_payload(account, credentials)
 
 
 class Sub2APIImportService:
@@ -472,18 +501,17 @@ class Sub2APIImportService:
     def _run_import(self, server_id: str, server: dict, account_ids: list[str]) -> None:
         self._update_job(server_id, status="running")
 
-        tokens: list[str] = []
+        account_payloads: list[dict] = []
         max_workers = min(8, max(1, len(account_ids)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {
-                executor.submit(_fetch_access_token_for_account, server, account_id): account_id
+                executor.submit(_fetch_account_payload_for_account, server, account_id): account_id
                 for account_id in account_ids
             }
             for future in as_completed(future_map):
                 account_id = future_map[future]
                 try:
-                    token, _meta = future.result()
-                    tokens.append(token)
+                    account_payloads.append(future.result())
                 except Exception as exc:
                     self._append_error(server_id, account_id, str(exc) or "unknown error")
 
@@ -495,7 +523,7 @@ class Sub2APIImportService:
                     failed=failed,
                 )
 
-        if not tokens:
+        if not account_payloads:
             current = self._config.get_import_job(server_id) or {}
             self._update_job(
                 server_id,
@@ -505,7 +533,8 @@ class Sub2APIImportService:
             )
             return
 
-        add_result = account_service.add_accounts(tokens)
+        tokens = [str(item.get("access_token") or "").strip() for item in account_payloads]
+        add_result = account_service.add_account_items(account_payloads)
         refresh_result = account_service.refresh_accounts(tokens)
         current = self._config.get_import_job(server_id) or {}
         self._update_job(

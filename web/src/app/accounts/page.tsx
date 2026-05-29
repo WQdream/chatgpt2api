@@ -183,6 +183,10 @@ function displayAccountType(account: Account) {
   return account.type || "Free";
 }
 
+function isAutoRefreshable(account: Account) {
+  return Boolean(account.auto_refreshable ?? account.has_refresh_token);
+}
+
 function AccountsPageContent() {
   const didLoadRef = useRef(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -655,7 +659,7 @@ function AccountsPageContent() {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[920px] text-left">
+              <table className="w-full min-w-[1040px] text-left">
                 <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
                   <tr>
                     <th className="w-12 px-4 py-3">
@@ -667,6 +671,7 @@ function AccountsPageContent() {
                     <th className="w-56 px-4 py-3">token</th>
                     <th className="w-28 px-4 py-3">类型</th>
                     <th className="w-24 px-4 py-3">状态</th>
+                    <th className="w-32 px-4 py-3">自动刷新</th>
                     <th className="w-56 px-4 py-3">账号信息</th>
                     <th className="w-24 px-4 py-3">额度</th>
                     <th className="w-40 px-4 py-3">恢复时间</th>
@@ -729,6 +734,14 @@ function AccountsPageContent() {
                           >
                             <StatusIcon className="size-3.5" />
                             {account.status}
+                          </Badge>
+                        </td>
+                        <td className="px-4 py-3">
+                          <Badge
+                            variant={isAutoRefreshable(account) ? "success" : "secondary"}
+                            className="rounded-md"
+                          >
+                            {isAutoRefreshable(account) ? "可自动刷新" : "仅 AccessToken"}
                           </Badge>
                         </td>
                         <td className="px-4 py-3">

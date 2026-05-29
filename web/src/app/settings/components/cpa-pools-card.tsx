@@ -159,7 +159,7 @@ export function CPAPoolsCard() {
           <ul className="mt-1 list-inside list-disc space-y-0.5">
             <li>页面进入后先读取系统里已配置的 CPA 连接。</li>
             <li>点击某个连接的「同步」后，会先读取远程账号列表并展示给前端选择。</li>
-            <li>确认选择后，后端后台下载对应 access_token 并导入本地号池。</li>
+            <li>确认选择后，后端后台下载完整账号 JSON 并导入本地号池。</li>
             <li>前端只轮询导入进度，不直接参与 download。</li>
           </ul>
         </div>

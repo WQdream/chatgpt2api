@@ -1,5 +1,6 @@
 import base64
 import json
+import time
 import unittest
 from typing import Any
 
@@ -112,6 +113,56 @@ class AccountExportTests(unittest.TestCase):
         self.assertEqual(account["export_type"], "codex")
         self.assertEqual(account["refresh_token"], "rt_test")
         self.assertEqual(account["account_id"], "acct_123")
+
+    def test_add_account_items_extracts_client_id_and_lists_auto_refresh_flag(self) -> None:
+        access_token = make_jwt({"client_id": "app_from_token"})
+        service = AccountService(MemoryStorage())
+
+        service.add_account_items([{"access_token": access_token, "refresh_token": "rt_test"}])
+
+        account = service.get_account(access_token)
+        [listed] = service.list_accounts()
+        self.assertIsNotNone(account)
+        self.assertEqual(account["client_id"], "app_from_token")
+        self.assertTrue(listed["has_refresh_token"])
+        self.assertTrue(listed["auto_refreshable"])
+
+    def test_access_token_only_account_lists_as_not_auto_refreshable(self) -> None:
+        service = AccountService(MemoryStorage())
+
+        service.add_accounts(["access_token_only"])
+
+        [listed] = service.list_accounts()
+        self.assertFalse(listed["has_refresh_token"])
+        self.assertFalse(listed["auto_refreshable"])
+
+    def test_refresh_access_token_uses_account_client_id(self) -> None:
+        class RefreshService(AccountService):
+            def __init__(self) -> None:
+                self.requested_client_id = ""
+                super().__init__(MemoryStorage())
+
+            def _request_access_token_refresh(self, refresh_token: str, client_id: str) -> dict[str, str]:
+                self.requested_client_id = client_id
+                return {
+                    "access_token": make_jwt({"exp": int(time.time()) + 3600, "client_id": client_id}),
+                    "refresh_token": "rt_new",
+                    "id_token": "id_new",
+                    "client_id": client_id,
+                }
+
+        old_access_token = make_jwt({"exp": int(time.time()) - 10, "client_id": "app_from_token"})
+        service = RefreshService()
+        service.add_account_items([{"access_token": old_access_token, "refresh_token": "rt_old"}])
+
+        new_access_token = service.refresh_access_token(old_access_token)
+        account = service.get_account(new_access_token)
+
+        self.assertNotEqual(new_access_token, old_access_token)
+        self.assertEqual(service.requested_client_id, "app_from_token")
+        self.assertIsNotNone(account)
+        self.assertEqual(account["refresh_token"], "rt_new")
+        self.assertEqual(account["client_id"], "app_from_token")
 
 
 if __name__ == "__main__":

@@ -15,9 +15,12 @@ export type Account = {
   email?: string | null;
   expired?: string | null;
   id_token?: string | null;
+  client_id?: string | null;
   account_id?: string | null;
   last_refresh?: string | null;
   refresh_token?: string | null;
+  has_refresh_token?: boolean;
+  auto_refreshable?: boolean;
   user_id?: string | null;
   limits_progress?: Array<{
     feature_name?: string;
@@ -66,6 +69,8 @@ export type AccountImportPayload = {
   account_id?: string;
   last_refresh?: string;
   refresh_token?: string;
+  client_id?: string;
+  clientId?: string;
   [key: string]: unknown;
 };
 

@@ -21,8 +21,8 @@ class AccountService:
 
     _NEW_ACCOUNT_INVALID_GRACE_SECONDS = 10 * 60
     _INVALID_CONFIRM_SECONDS = 30
-    _ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 24 * 60 * 60
-    _REFRESH_TOKEN_KEEPALIVE_SECONDS = 3 * 24 * 60 * 60
+    _ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 5 * 24 * 60 * 60
+    _REFRESH_TOKEN_KEEPALIVE_SECONDS = 5 * 24 * 60 * 60
     _REFRESH_TOKEN_KEEPALIVE_ERROR_BACKOFF_SECONDS = 6 * 60 * 60
     _REFRESH_TOKEN_KEEPALIVE_BATCH_SIZE = 3
     _TOKEN_REFRESH_ERROR_BACKOFF_SECONDS = 5 * 60
@@ -105,6 +105,25 @@ class AccountService:
         tz = timezone(timedelta(hours=8))
         return datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(tz).isoformat()
 
+    @classmethod
+    def _client_id_from_access_token(cls, access_token: str) -> str:
+        return str(cls._decode_jwt_payload(access_token).get("client_id") or "").strip()
+
+    @classmethod
+    def _account_client_id(cls, account: dict) -> str:
+        client_id = str(account.get("client_id") or "").strip()
+        if client_id:
+            return client_id
+        return cls._client_id_from_access_token(str(account.get("access_token") or "")) or cls._OAUTH_CLIENT_ID
+
+    @staticmethod
+    def _with_account_flags(account: dict) -> dict:
+        item = dict(account)
+        has_refresh_token = bool(str(item.get("refresh_token") or "").strip())
+        item["has_refresh_token"] = has_refresh_token
+        item["auto_refreshable"] = has_refresh_token
+        return item
+
     def _load_accounts(self) -> dict[str, dict]:
         accounts = self.storage.load_accounts()
         return {
@@ -164,7 +183,7 @@ class AccountService:
     def _normalize_account(self, item: dict) -> dict | None:
         if not isinstance(item, dict):
             return None
-        access_token = item.get("access_token") or item.get("accessToken") or ""
+        access_token = str(item.get("access_token") or item.get("accessToken") or "").strip()
         if not access_token:
             return None
         normalized = dict(item)
@@ -180,6 +199,14 @@ class AccountService:
         normalized["limits_progress"] = limits_progress if isinstance(limits_progress, list) else []
         normalized["default_model_slug"] = normalized.get("default_model_slug") or None
         normalized["restore_at"] = normalized.get("restore_at") or None
+        normalized["refresh_token"] = str(normalized.get("refresh_token") or "").strip() or None
+        normalized["id_token"] = str(normalized.get("id_token") or "").strip() or None
+        normalized["client_id"] = (
+            str(normalized.get("client_id") or normalized.get("clientId") or "").strip()
+            or self._client_id_from_access_token(access_token)
+            or None
+        )
+        normalized.pop("clientId", None)
         normalized["success"] = int(normalized.get("success") or 0)
         normalized["fail"] = int(normalized.get("fail") or 0)
         normalized["invalid_count"] = int(normalized.get("invalid_count") or 0)
@@ -286,6 +313,7 @@ class AccountService:
     def _refresh_token_keepalive_anchor(self, account: dict) -> datetime | None:
         return (
             self._parse_time(account.get("last_token_refresh_at"))
+            or self._parse_time(account.get("last_refresh"))
             or self._token_issued_at(str(account.get("access_token") or ""))
             or self._parse_time(account.get("created_at"))
         )
@@ -303,10 +331,11 @@ class AccountService:
         due_at = anchor + timedelta(seconds=self._REFRESH_TOKEN_KEEPALIVE_SECONDS)
         return due_at if due_at <= now else None
 
-    def _request_access_token_refresh(self, refresh_token: str) -> dict[str, str]:
+    def _request_access_token_refresh(self, refresh_token: str, client_id: str) -> dict[str, str]:
         from curl_cffi import requests
         from services.proxy_service import proxy_settings
 
+        client_id = str(client_id or "").strip() or self._OAUTH_CLIENT_ID
         session = requests.Session(**proxy_settings.build_session_kwargs(impersonate="chrome", verify=True))
         try:
             response = session.post(
@@ -319,7 +348,8 @@ class AccountService:
                 data={
                     "grant_type": "refresh_token",
                     "refresh_token": refresh_token,
-                    "client_id": self._OAUTH_CLIENT_ID,
+                    "client_id": client_id,
+                    "scope": "openid profile email",
                 },
                 timeout=60,
             )
@@ -334,6 +364,7 @@ class AccountService:
                 "access_token": str(data.get("access_token") or "").strip(),
                 "refresh_token": str(data.get("refresh_token") or refresh_token).strip(),
                 "id_token": str(data.get("id_token") or "").strip(),
+                "client_id": client_id,
             }
         finally:
             session.close()
@@ -355,6 +386,8 @@ class AccountService:
                 next_item["refresh_token"] = str(token_data.get("refresh_token") or "").strip()
             if token_data.get("id_token"):
                 next_item["id_token"] = str(token_data.get("id_token") or "").strip()
+            if token_data.get("client_id"):
+                next_item["client_id"] = str(token_data.get("client_id") or "").strip()
             next_item["last_token_refresh_at"] = now
             next_item["last_token_refresh_error"] = None
             next_item["last_token_refresh_error_at"] = None
@@ -401,7 +434,7 @@ class AccountService:
             if not force and self._recent_token_refresh_error(account):
                 return active_token
             try:
-                token_data = self._request_access_token_refresh(refresh_token)
+                token_data = self._request_access_token_refresh(refresh_token, self._account_client_id(account))
             except Exception as exc:
                 self._record_token_refresh_error(active_token, event, str(exc))
                 return active_token
@@ -570,7 +603,7 @@ class AccountService:
 
     def list_accounts(self) -> list[dict]:
         with self._lock:
-            return [dict(item) for item in self._accounts.values()]
+            return [self._with_account_flags(item) for item in self._accounts.values()]
 
     def list_limited_tokens(self) -> list[str]:
         with self._lock:
@@ -657,7 +690,7 @@ class AccountService:
                 if account is not None:
                     self._accounts[access_token] = account
             self._save_accounts()
-            items = [dict(item) for item in self._accounts.values()]
+            items = [self._with_account_flags(item) for item in self._accounts.values()]
             log_service.add(LOG_TYPE_ACCOUNT, f"新增 {added} 个账号，跳过 {skipped} 个",
                             {"added": added, "skipped": skipped})
         return {"added": added, "skipped": skipped, "items": items}
@@ -683,7 +716,7 @@ class AccountService:
                     self._index = 0
                 self._save_accounts()
                 log_service.add(LOG_TYPE_ACCOUNT, f"删除 {removed} 个账号", {"removed": removed})
-            items = [dict(item) for item in self._accounts.values()]
+            items = [self._with_account_flags(item) for item in self._accounts.values()]
         return {"removed": removed, "items": items}
 
     def update_account(self, access_token: str, updates: dict) -> dict | None:
@@ -706,7 +739,7 @@ class AccountService:
             self._save_accounts()
             log_service.add(LOG_TYPE_ACCOUNT, "更新账号",
                             {"token": anonymize_token(access_token), "status": account.get("status")})
-            return dict(account)
+            return self._with_account_flags(account)
         return None
 
     def _record_refresh_success(self, access_token: str) -> None:
@@ -895,6 +928,7 @@ class AccountService:
                 "access_token": access_token,
                 "refresh_token": refresh_token,
                 "id_token": id_token,
+                "client_id": self._account_client_id(account),
                 "expired": self._timestamp_to_iso(access_payload.get("exp")),
                 "last_refresh": self._timestamp_to_iso(access_payload.get("iat")),
             }
