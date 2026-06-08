@@ -953,7 +953,7 @@ class FreemailProvider(BaseMailProvider):
         self.jwt_token = str(entry.get("jwt_token") or "").strip()
         self.domain = _normalize_string_list(entry.get("domain"))
         self.domain_index_map: dict[str, int] = entry.get("domain_index_map") or {}
-        self.session = curl_requests.Session(impersonate="chrome")
+        self.session = _create_session(conf)
 
     def _auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.jwt_token}"}
