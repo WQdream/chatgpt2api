@@ -6,6 +6,8 @@ import itertools
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+
+from utils.timezone import BEIJING_TZ
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -63,7 +65,7 @@ class LogService:
     def add(self, type: str, summary: str = "", detail: dict[str, Any] | None = None, **data: Any) -> None:
         item = {
             "id": uuid4().hex,
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "time": datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S"),
             "type": type,
             "summary": summary,
             "detail": detail or data,
@@ -307,8 +309,8 @@ class LoggedCall:
             "role": self.identity.get("role"),
             "endpoint": self.endpoint,
             "model": self.model,
-            "started_at": datetime.fromtimestamp(self.started).strftime("%Y-%m-%d %H:%M:%S"),
-            "ended_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "started_at": datetime.fromtimestamp(self.started, tz=BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+            "ended_at": datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S"),
             "duration_ms": int((time.time() - self.started) * 1000),
             "status": status,
         }

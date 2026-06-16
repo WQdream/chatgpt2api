@@ -7,6 +7,8 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+
+from utils.timezone import BEIJING_TZ
 from pathlib import Path
 from threading import Condition, Lock, Thread
 from typing import Any
@@ -909,6 +911,10 @@ class AccountService:
                 })
                 continue
             if account:
+                try:
+                    self.fetch_remote_info(after, event="keepalive_validate", defer_invalid_removal=False)
+                except Exception:
+                    pass
                 refreshed += 1
 
         return {
@@ -1058,7 +1064,7 @@ class AccountService:
             if current is None:
                 return
             next_item = dict(current)
-            next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            next_item["last_used_at"] = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
             account = self._normalize_account(next_item)
             if account is None:
                 return
@@ -1304,7 +1310,7 @@ class AccountService:
             if current is None:
                 return None
             next_item = dict(current)
-            next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            next_item["last_used_at"] = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
             image_quota_unknown = bool(next_item.get("image_quota_unknown"))
             if success:
                 next_item["success"] = int(next_item.get("success") or 0) + 1

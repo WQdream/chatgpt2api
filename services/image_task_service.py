@@ -5,6 +5,8 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import datetime
+
+from utils.timezone import BEIJING_TZ
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +24,7 @@ UNFINISHED_STATUSES = {TASK_STATUS_QUEUED, TASK_STATUS_RUNNING}
 
 
 def _now_iso() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _timestamp(value: object) -> float:
@@ -326,7 +328,7 @@ class ImageTaskService:
             "role": identity.get("role"),
             "endpoint": endpoint,
             "model": model,
-            "started_at": datetime.fromtimestamp(started).strftime("%Y-%m-%d %H:%M:%S"),
+            "started_at": datetime.fromtimestamp(started, tz=BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S"),
             "ended_at": _now_iso(),
             "duration_ms": int((time.time() - started) * 1000),
             "status": status,

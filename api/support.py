@@ -97,7 +97,7 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
                         f"{len(limited_tokens)} limited accounts, "
                         f"{len(expiring_tokens)} expiring access tokens"
                     )
-                    account_service.refresh_accounts(tokens)
+                    account_service.refresh_accounts(tokens, defer_invalid_removal=False)
                 if keepalive_tokens:
                     print(f"[account-watcher] keepalive {len(keepalive_tokens)} refresh tokens")
                     result = account_service.keepalive_refresh_tokens(keepalive_tokens)

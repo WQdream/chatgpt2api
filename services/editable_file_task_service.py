@@ -4,6 +4,8 @@ import json
 import threading
 import time
 from datetime import datetime
+
+from utils.timezone import BEIJING_TZ
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -26,7 +28,7 @@ EDITABLE_FILE_TASKS_PATH = DATA_DIR / "editable_file_tasks.json"
 
 
 def _now_iso() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _clean(value: object, default: str = "") -> str:
@@ -234,7 +236,7 @@ class EditableFileTaskService:
             "role": identity.get("role"),
             "endpoint": f"/v1/{kind}/generations",
             "model": EDITABLE_FILE_MODEL,
-            "started_at": datetime.fromtimestamp(started).strftime("%Y-%m-%d %H:%M:%S"),
+            "started_at": datetime.fromtimestamp(started, tz=BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S"),
             "ended_at": _now_iso(),
             "duration_ms": int((time.time() - started) * 1000),
             "status": status,

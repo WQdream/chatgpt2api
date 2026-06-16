@@ -7,6 +7,8 @@ import re
 import uuid
 import zipfile
 from datetime import datetime
+
+from utils.timezone import BEIJING_TZ
 from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException
@@ -129,7 +131,7 @@ def _unique_tokens(tokens: list[str]) -> list[str]:
 
 
 def _download_timestamp() -> str:
-    return datetime.now().strftime("%Y%m%d-%H%M%S")
+    return datetime.now(BEIJING_TZ).strftime("%Y%m%d-%H%M%S")
 
 
 def _safe_export_name(value: str, fallback: str) -> str:

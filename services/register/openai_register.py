@@ -10,6 +10,8 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+
+from utils.timezone import BEIJING_TZ
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -117,7 +119,7 @@ def log(text: str, color: str = "") -> None:
     with print_lock:
         prefix = colors.get(color, "")
         suffix = "\033[0m" if prefix else ""
-        print(f"{prefix}{datetime.now().strftime('%H:%M:%S')} {text}{suffix}")
+        print(f"{prefix}{datetime.now(BEIJING_TZ).strftime('%H:%M:%S')} {text}{suffix}")
 
 
 def step(index: int, text: str, color: str = "") -> None:
