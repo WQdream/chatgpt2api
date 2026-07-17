@@ -12,7 +12,7 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import unquote, urljoin, urlsplit
@@ -117,6 +117,11 @@ class SentinelSDKTokens:
     token: str
     so_token: str
     sdk_version: str
+    proof_token: str = ""
+    turnstile_token: str = ""
+    challenge_token: str = ""
+    requirements: dict[str, bool] = field(default_factory=dict)
+    runtime_mode: str = "chromium"
 
 
 def discover_official_sdk(
@@ -223,7 +228,7 @@ def run_official_sdk(
     user_agent: str,
     proxy: str = "",
     observer_wait_ms: int = DEFAULT_OBSERVER_WAIT_MS,
-) -> dict[str, str]:
+) -> dict[str, object]:
     """在真实 Chromium 页面上下文中加载并执行当前官方 Sentinel SDK。"""
     try:
         from playwright.sync_api import sync_playwright
@@ -266,6 +271,20 @@ def run_official_sdk(
                     ]
                 )
                 page = context.new_page()
+                requirements: dict[str, object] = {}
+
+                def capture_requirements(response) -> None:
+                    if "/backend-api/sentinel/req" not in str(response.url):
+                        return
+                    try:
+                        payload = response.json()
+                    except Exception:
+                        return
+                    if isinstance(payload, dict):
+                        requirements.clear()
+                        requirements.update(payload)
+
+                page.on("response", capture_requirements)
                 page.route(
                     SENTINEL_RUNTIME_URL,
                     lambda route: route.fulfill(status=200, content_type="text/html", body=runtime_html),
@@ -276,11 +295,80 @@ def run_official_sdk(
                 return {
                     "token": str((result or {}).get("token") or ""),
                     "so_token": str((result or {}).get("so_token") or ""),
+                    "requirements": requirements,
                 }
             finally:
                 browser.close()
     finally:
         _sentinel_browser_slots.release()
+
+
+_SDK_RUNTIME_ERROR_MARKERS = (
+    "typeerror",
+    "referenceerror",
+    "cannot read properties",
+    "cannot set properties",
+    "is not a function",
+    "reading 'bind'",
+    'reading "bind"',
+)
+
+
+def _contains_encoded_runtime_error(value: str) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+
+    candidates = [raw]
+    for prefix in ("gAAAAAB", "gAAAAAC"):
+        if raw.startswith(prefix):
+            candidates.append(raw[len(prefix) :].removesuffix("~S"))
+
+    inspected = list(candidates)
+    for candidate in candidates:
+        compact = candidate.strip()
+        if not compact:
+            continue
+        padded = compact + ("=" * (-len(compact) % 4))
+        for decoder in (base64.b64decode, base64.urlsafe_b64decode):
+            try:
+                inspected.append(decoder(padded).decode("utf-8", errors="ignore"))
+            except Exception:
+                continue
+
+    return any(
+        marker in inspected_value.lower()
+        for inspected_value in inspected
+        for marker in _SDK_RUNTIME_ERROR_MARKERS
+    )
+
+
+def _require_valid_sdk_value(name: str, value: str, *, required: bool) -> None:
+    if required and not value:
+        raise RuntimeError(f"sentinel_sdk_{name}_missing")
+    if value and _contains_encoded_runtime_error(value):
+        raise RuntimeError(f"sentinel_sdk_{name}_invalid")
+
+
+def _normalize_requirements(raw: object, flow: str) -> dict[str, bool]:
+    if not isinstance(raw, dict) or not raw:
+        raise RuntimeError("sentinel_sdk_requirements_missing")
+
+    sections = ["proofofwork", "turnstile"]
+    if flow == "oauth_create_account":
+        sections.append("so")
+    if any(not isinstance(raw.get(name), dict) or "required" not in raw[name] for name in sections):
+        raise RuntimeError("sentinel_sdk_requirements_missing")
+
+    def required(name: str) -> bool:
+        value = raw.get(name)
+        return bool(value.get("required")) if isinstance(value, dict) else False
+
+    return {
+        "proof": required("proofofwork"),
+        "turnstile": required("turnstile"),
+        "so": required("so"),
+    }
 
 
 def generate_official_sentinel_tokens(
@@ -307,9 +395,33 @@ def generate_official_sentinel_tokens(
     so_token = str(values.get("so_token") or "").strip()
     if not token:
         raise RuntimeError("sentinel_sdk_token_missing")
-    if not so_token:
-        raise RuntimeError("sentinel_sdk_so_token_missing")
-    return SentinelSDKTokens(token=token, so_token=so_token, sdk_version=descriptor.version)
+    try:
+        combined = json.loads(token)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("sentinel_sdk_combined_token_invalid") from exc
+    if not isinstance(combined, dict) or combined.get("e"):
+        raise RuntimeError("sentinel_sdk_combined_token_invalid")
+
+    requirements = _normalize_requirements(values.get("requirements"), flow)
+    proof_token = combined.get("p") if isinstance(combined.get("p"), str) else ""
+    turnstile_token = combined.get("t") if isinstance(combined.get("t"), str) else ""
+    challenge_token = combined.get("c") if isinstance(combined.get("c"), str) else ""
+
+    _require_valid_sdk_value("proof_token", proof_token, required=requirements["proof"])
+    _require_valid_sdk_value("turnstile_token", turnstile_token, required=requirements["turnstile"])
+    _require_valid_sdk_value("challenge_token", challenge_token, required=True)
+    _require_valid_sdk_value("so_token", so_token, required=requirements["so"])
+
+    return SentinelSDKTokens(
+        token=token,
+        so_token=so_token,
+        sdk_version=descriptor.version,
+        proof_token=proof_token,
+        turnstile_token=turnstile_token,
+        challenge_token=challenge_token,
+        requirements=requirements,
+        runtime_mode="chromium",
+    )
 
 
 def build_sentinel_token(

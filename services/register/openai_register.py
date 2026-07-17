@@ -531,24 +531,42 @@ class PlatformRegistrar:
     def _register_user(self, email: str, password: str, index: int) -> None:
         step(index, "开始提交注册密码")
         url = f"{auth_base}/api/accounts/user/register"
-        headers = self._json_headers(f"{auth_base}/create-account/password")
-        headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "username_password_create")
-        headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+
+        def build_headers() -> dict[str, str]:
+            sdk_tokens = generate_official_sentinel_tokens(
+                self.session,
+                self.device_id,
+                "username_password_create",
+                user_agent=self.clearance_user_agent or user_agent,
+                proxy=self._sentinel_proxy(),
+                observer_wait_ms=5000,
+            )
+            step(
+                index,
+                "Sentinel SDK "
+                "flow=username_password_create, "
+                f"sdk_version={sdk_tokens.sdk_version}, "
+                f"runtime_mode={sdk_tokens.runtime_mode}, "
+                f"p_length={len(sdk_tokens.proof_token)}, "
+                f"t_length={len(sdk_tokens.turnstile_token)}, "
+                f"c_length={len(sdk_tokens.challenge_token)}",
+            )
+            headers = self._json_headers(f"{auth_base}/create-account/password")
+            headers["OpenAI-Sentinel-Token"] = sdk_tokens.token
+            return _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+
+        headers = build_headers()
         resp, error = request_with_local_retry(self.session, "post", url, json={"username": email, "password": password}, headers=headers, verify=False)
         if _is_cloudflare_challenge(resp):
             bundle = self._refresh_cloudflare_clearance(auth_base, index)
             if bundle is None:
                 raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
-            headers = self._json_headers(f"{auth_base}/create-account/password")
-            headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "username_password_create")
-            headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+            headers = build_headers()
             resp, error = request_with_local_retry(self.session, "post", url, json={"username": email, "password": password}, headers=headers, verify=False)
             if _is_cloudflare_challenge(resp):
                 raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
         if resp is None or resp.status_code != 200:
             data = _response_json(resp) if resp is not None else {}
-            if data.get("message") == "Failed to create account. Please try again.":
-                step(index, "注册失败提示: 邮箱域名很可能因滥用被封禁，请更换邮箱域名", "yellow")
             detail = f", detail={json.dumps(data, ensure_ascii=False)}" if data else ""
             raise RuntimeError(error or f"user_register_http_{getattr(resp, 'status_code', 'unknown')}{detail}")
         step(index, "提交注册密码完成")
@@ -599,7 +617,11 @@ class PlatformRegistrar:
             sentinel_diagnostics.update(
                 {
                     "sdk_version": sdk_tokens.sdk_version,
+                    "runtime_mode": sdk_tokens.runtime_mode,
                     "token_length": len(sdk_tokens.token),
+                    "p_length": len(sdk_tokens.proof_token),
+                    "t_length": len(sdk_tokens.turnstile_token),
+                    "c_length": len(sdk_tokens.challenge_token),
                     "so_token_generated": bool(sdk_tokens.so_token),
                 }
             )
@@ -607,7 +629,11 @@ class PlatformRegistrar:
                 index,
                 "Sentinel SDK "
                 f"sdk_version={sentinel_diagnostics['sdk_version']}, "
+                f"runtime_mode={sentinel_diagnostics['runtime_mode']}, "
                 f"token_length={sentinel_diagnostics['token_length']}, "
+                f"p_length={sentinel_diagnostics['p_length']}, "
+                f"t_length={sentinel_diagnostics['t_length']}, "
+                f"c_length={sentinel_diagnostics['c_length']}, "
                 f"so_token_generated={sentinel_diagnostics['so_token_generated']}",
             )
             headers = self._json_headers(f"{auth_base}/about-you")
@@ -634,12 +660,14 @@ class PlatformRegistrar:
                     index,
                     "create_account registration_disallowed，优先核对 Sentinel SDK 双 token: "
                     f"sdk_version={sentinel_diagnostics.get('sdk_version', '')}, "
+                    f"runtime_mode={sentinel_diagnostics.get('runtime_mode', '')}, "
                     f"token_length={sentinel_diagnostics.get('token_length', 0)}, "
+                    f"p_length={sentinel_diagnostics.get('p_length', 0)}, "
+                    f"t_length={sentinel_diagnostics.get('t_length', 0)}, "
+                    f"c_length={sentinel_diagnostics.get('c_length', 0)}, "
                     f"so_token_generated={sentinel_diagnostics.get('so_token_generated', False)}",
                     "yellow",
                 )
-            if data.get("message") == "Failed to create account. Please try again.":
-                step(index, "创建账号失败提示: 邮箱域名很可能因滥用被封禁，请更换邮箱域名", "yellow")
             detail = f", detail={json.dumps(data, ensure_ascii=False)}" if data else ""
             raise RuntimeError(error or f"create_account_http_{getattr(resp, 'status_code', 'unknown')}{detail}")
         data = _response_json(resp)

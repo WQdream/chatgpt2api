@@ -91,6 +91,92 @@ class RegisterFinalCreateTests(unittest.TestCase):
         self.assertNotIn("sdk-sentinel-secret", joined_logs)
         self.assertNotIn("sdk-so-secret", joined_logs)
 
+    def test_password_registration_uses_official_sdk_turnstile_token(self):
+        registrar = self._registrar()
+        calls = []
+        logs = []
+        tokens = SentinelSDKTokens(
+            token="sdk-username-combined-secret",
+            so_token="",
+            sdk_version="20260219f9f6",
+            proof_token="proof-secret",
+            turnstile_token="turnstile-secret",
+            challenge_token="challenge-secret",
+            requirements={"proof": True, "turnstile": True, "so": False},
+        )
+
+        def fake_request(session, method, url, **kwargs):
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse(), ""
+
+        with patch.object(openai_register, "generate_official_sentinel_tokens", return_value=tokens) as generate, patch.object(
+            openai_register,
+            "request_with_local_retry",
+            side_effect=fake_request,
+        ), patch.object(openai_register, "step", side_effect=lambda _index, text, _color="": logs.append(text)):
+            registrar._register_user("person@example.com", "Password!123", 1)
+
+        generate.assert_called_once()
+        self.assertEqual(generate.call_args.args[2], "username_password_create")
+        self.assertEqual(calls[0]["headers"]["OpenAI-Sentinel-Token"], "sdk-username-combined-secret")
+        joined_logs = "\n".join(logs)
+        self.assertIn("flow=username_password_create", joined_logs)
+        self.assertIn("p_length=12", joined_logs)
+        self.assertIn("t_length=16", joined_logs)
+        self.assertIn("c_length=16", joined_logs)
+        self.assertNotIn("proof-secret", joined_logs)
+        self.assertNotIn("turnstile-secret", joined_logs)
+        self.assertNotIn("challenge-secret", joined_logs)
+
+    def test_password_registration_refreshes_official_sdk_token_after_cloudflare(self):
+        registrar = self._registrar()
+        calls = []
+        first = SentinelSDKTokens(
+            token="first-combined-token",
+            so_token="",
+            sdk_version="20260219f9f6",
+            proof_token="proof-1",
+            turnstile_token="turnstile-1",
+            challenge_token="challenge-1",
+            requirements={"proof": True, "turnstile": True, "so": False},
+        )
+        second = SentinelSDKTokens(
+            token="second-combined-token",
+            so_token="",
+            sdk_version="20260219f9f6",
+            proof_token="proof-2",
+            turnstile_token="turnstile-2",
+            challenge_token="challenge-2",
+            requirements={"proof": True, "turnstile": True, "so": False},
+        )
+
+        def fake_request(session, method, url, **kwargs):
+            calls.append({"method": method, "url": url, **kwargs})
+            return FakeResponse(), ""
+
+        with patch.object(
+            openai_register,
+            "generate_official_sentinel_tokens",
+            side_effect=[first, second],
+        ) as generate, patch.object(
+            openai_register,
+            "request_with_local_retry",
+            side_effect=fake_request,
+        ), patch.object(
+            openai_register,
+            "_is_cloudflare_challenge",
+            side_effect=[True, False],
+        ), patch.object(
+            registrar,
+            "_refresh_cloudflare_clearance",
+            return_value=object(),
+        ), patch.object(openai_register, "step"):
+            registrar._register_user("person@example.com", "Password!123", 1)
+
+        self.assertEqual(generate.call_count, 2)
+        self.assertEqual(calls[0]["headers"]["OpenAI-Sentinel-Token"], "first-combined-token")
+        self.assertEqual(calls[1]["headers"]["OpenAI-Sentinel-Token"], "second-combined-token")
+
     def test_registration_disallowed_log_points_to_sdk_diagnostics_without_token_values(self):
         registrar = self._registrar()
         logs = []
@@ -120,6 +206,50 @@ class RegisterFinalCreateTests(unittest.TestCase):
         self.assertIn("so_token_generated=True", joined_logs)
         self.assertNotIn("sdk-sentinel-secret", joined_logs)
         self.assertNotIn("sdk-so-secret", joined_logs)
+
+    def test_password_registration_failure_does_not_guess_email_domain_cause(self):
+        registrar = self._registrar()
+        logs = []
+        tokens = SentinelSDKTokens(
+            token="sdk-username-combined-secret",
+            so_token="",
+            sdk_version="20260219f9f6",
+        )
+        response = FakeResponse(
+            status_code=400,
+            data={"message": "Failed to create account. Please try again."},
+        )
+        with patch.object(openai_register, "generate_official_sentinel_tokens", return_value=tokens), patch.object(
+            openai_register,
+            "request_with_local_retry",
+            return_value=(response, ""),
+        ), patch.object(openai_register, "step", side_effect=lambda _index, text, _color="": logs.append(text)):
+            with self.assertRaisesRegex(RuntimeError, "user_register_http_400"):
+                registrar._register_user("person@example.com", "Password!123", 1)
+
+        self.assertNotIn("邮箱域名", "\n".join(logs))
+
+    def test_create_account_failure_does_not_guess_email_domain_cause(self):
+        registrar = self._registrar()
+        logs = []
+        tokens = SentinelSDKTokens(
+            token="sdk-sentinel-secret",
+            so_token="sdk-so-secret",
+            sdk_version="20260219f9f6",
+        )
+        response = FakeResponse(
+            status_code=400,
+            data={"message": "Failed to create account. Please try again."},
+        )
+        with patch.object(openai_register, "generate_official_sentinel_tokens", return_value=tokens), patch.object(
+            openai_register,
+            "request_with_local_retry",
+            return_value=(response, ""),
+        ), patch.object(openai_register, "step", side_effect=lambda _index, text, _color="": logs.append(text)):
+            with self.assertRaisesRegex(RuntimeError, "create_account_http_400"):
+                registrar._create_account("Example User", "2000-01-01", 1)
+
+        self.assertNotIn("邮箱域名", "\n".join(logs))
 
     def test_register_sequence_advances_email_before_password(self):
         registrar = self._registrar()
