@@ -6,10 +6,16 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import random
+import re
+import threading
 import time
 import uuid
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import unquote, urljoin, urlsplit
 
 if TYPE_CHECKING:
     from curl_cffi.requests import Session
@@ -91,6 +97,219 @@ DEFAULT_SENTINEL_USER_AGENT = (
     "Chrome/145.0.0.0 Safari/537.36"
 )
 DEFAULT_SENTINEL_SEC_CH_UA = '"Chromium";v="145", "Google Chrome";v="145", "Not/A)Brand";v="99"'
+
+SENTINEL_FRAME_URL = "https://sentinel.openai.com/backend-api/sentinel/frame.html"
+SENTINEL_RUNTIME_URL = "https://auth.openai.com/__sentinel_sdk_runtime__"
+DEFAULT_OBSERVER_WAIT_MS = 5000
+SENTINEL_BROWSER_CONCURRENCY = max(1, int(os.getenv("SENTINEL_BROWSER_CONCURRENCY") or "2"))
+SENTINEL_BROWSER_TIMEOUT_MS = max(15_000, int(os.getenv("SENTINEL_BROWSER_TIMEOUT_MS") or "45000"))
+_sentinel_browser_slots = threading.BoundedSemaphore(SENTINEL_BROWSER_CONCURRENCY)
+
+
+@dataclass(frozen=True)
+class SentinelSDKDescriptor:
+    version: str
+    script_url: str
+
+
+@dataclass(frozen=True)
+class SentinelSDKTokens:
+    token: str
+    so_token: str
+    sdk_version: str
+
+
+def discover_official_sdk(
+    session: "Session",
+    *,
+    user_agent: str = "",
+) -> SentinelSDKDescriptor:
+    """从官方 frame.html 动态解析当前 Sentinel SDK 地址与版本。"""
+    ua = user_agent or DEFAULT_SENTINEL_USER_AGENT
+    resp = session.get(
+        SENTINEL_FRAME_URL,
+        headers={
+            "Accept": "text/html,application/xhtml+xml",
+            "Referer": "https://auth.openai.com/",
+            "User-Agent": ua,
+        },
+        timeout=20,
+        verify=True,
+    )
+    text = str(getattr(resp, "text", "") or "")
+    status = int(getattr(resp, "status_code", 0) or 0)
+    if status != 200:
+        raise RuntimeError(f"sentinel_sdk_frame_http_{status}")
+    match = re.search(
+        r"src\s*=\s*['\"]([^'\"]*/sentinel/([^/'\"]+)/sdk\.js(?:\?[^'\"]*)?)['\"]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        raise RuntimeError("sentinel_sdk_script_not_found")
+    version = str(match.group(2)).strip()
+    script_url = urljoin(SENTINEL_FRAME_URL, str(match.group(1)).strip())
+    parsed = urlsplit(script_url)
+    if (
+        parsed.scheme.lower() != "https"
+        or parsed.hostname != "sentinel.openai.com"
+        or not re.fullmatch(rf"/sentinel/{re.escape(version)}/sdk\.js", parsed.path)
+    ):
+        raise RuntimeError("sentinel_sdk_untrusted_script_url")
+    return SentinelSDKDescriptor(version=version, script_url=script_url)
+
+
+def build_sdk_evaluation_expression(flow: str, *, observer_wait_ms: int = DEFAULT_OBSERVER_WAIT_MS) -> str:
+    """构造仅调用官方 SDK 公共接口的浏览器表达式。"""
+    flow_json = json.dumps(str(flow), ensure_ascii=False)
+    wait_ms = max(DEFAULT_OBSERVER_WAIT_MS, int(observer_wait_ms or DEFAULT_OBSERVER_WAIT_MS))
+    return f"""
+async () => {{
+  const flow = {flow_json};
+  const collect = async () => {{
+    await SentinelSDK.init(flow);
+    await new Promise(resolve => setTimeout(resolve, {wait_ms}));
+    const token = await SentinelSDK.token(flow);
+    const soToken = await SentinelSDK.sessionObserverToken(flow);
+    return {{
+      token: typeof token === "string" ? token : "",
+      so_token: typeof soToken === "string" ? soToken : ""
+    }};
+  }};
+  return await Promise.race([
+    collect(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("sentinel_sdk_timeout")), {SENTINEL_BROWSER_TIMEOUT_MS}))
+  ]);
+}}
+""".strip()
+
+
+def _playwright_proxy(proxy: str) -> dict[str, str] | None:
+    value = str(proxy or "").strip()
+    if not value:
+        return None
+    parsed = urlsplit(value if "://" in value else f"http://{value}")
+    if not parsed.hostname:
+        return {"server": value}
+    server = f"{parsed.scheme or 'http'}://{parsed.hostname}"
+    if parsed.port:
+        server += f":{parsed.port}"
+    result = {"server": server}
+    if parsed.username:
+        result["username"] = unquote(parsed.username)
+    if parsed.password:
+        result["password"] = unquote(parsed.password)
+    return result
+
+
+def _browser_launch_options(playwright, proxy: str) -> dict:
+    options: dict = {"headless": True}
+    proxy_config = _playwright_proxy(proxy)
+    if proxy_config:
+        options["proxy"] = proxy_config
+    configured = str(os.getenv("SENTINEL_BROWSER_EXECUTABLE") or "").strip()
+    if configured:
+        options["executable_path"] = configured
+    elif os.name == "nt" and not Path(playwright.chromium.executable_path).exists():
+        options["channel"] = "msedge"
+    return options
+
+
+def run_official_sdk(
+    *,
+    descriptor: SentinelSDKDescriptor,
+    device_id: str,
+    flow: str,
+    user_agent: str,
+    proxy: str = "",
+    observer_wait_ms: int = DEFAULT_OBSERVER_WAIT_MS,
+) -> dict[str, str]:
+    """在真实 Chromium 页面上下文中加载并执行当前官方 Sentinel SDK。"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError("sentinel_playwright_missing") from exc
+
+    runtime_html = (
+        "<!doctype html><html><head><meta charset='utf-8'></head><body>"
+        f"<script src='{descriptor.script_url}'></script>"
+        "</body></html>"
+    )
+    expression = build_sdk_evaluation_expression(flow, observer_wait_ms=observer_wait_ms)
+    if not _sentinel_browser_slots.acquire(timeout=max(60, SENTINEL_BROWSER_TIMEOUT_MS // 1000 + 15)):
+        raise RuntimeError("sentinel_browser_concurrency_timeout")
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(**_browser_launch_options(playwright, proxy))
+            try:
+                context = browser.new_context(user_agent=user_agent, ignore_https_errors=False)
+                context.set_default_timeout(SENTINEL_BROWSER_TIMEOUT_MS)
+                context.set_default_navigation_timeout(SENTINEL_BROWSER_TIMEOUT_MS)
+                context.add_cookies(
+                    [
+                        {
+                            "name": "oai-did",
+                            "value": str(device_id),
+                            "domain": ".auth.openai.com",
+                            "path": "/",
+                            "secure": True,
+                            "sameSite": "Lax",
+                        },
+                        {
+                            "name": "oai-did",
+                            "value": str(device_id),
+                            "domain": ".openai.com",
+                            "path": "/",
+                            "secure": True,
+                            "sameSite": "Lax",
+                        },
+                    ]
+                )
+                page = context.new_page()
+                page.route(
+                    SENTINEL_RUNTIME_URL,
+                    lambda route: route.fulfill(status=200, content_type="text/html", body=runtime_html),
+                )
+                page.goto(SENTINEL_RUNTIME_URL, wait_until="load", timeout=SENTINEL_BROWSER_TIMEOUT_MS)
+                page.wait_for_function("typeof SentinelSDK !== 'undefined'", timeout=SENTINEL_BROWSER_TIMEOUT_MS)
+                result = page.evaluate(expression)
+                return {
+                    "token": str((result or {}).get("token") or ""),
+                    "so_token": str((result or {}).get("so_token") or ""),
+                }
+            finally:
+                browser.close()
+    finally:
+        _sentinel_browser_slots.release()
+
+
+def generate_official_sentinel_tokens(
+    session: "Session",
+    device_id: str,
+    flow: str,
+    *,
+    user_agent: str = "",
+    proxy: str = "",
+    observer_wait_ms: int = DEFAULT_OBSERVER_WAIT_MS,
+) -> SentinelSDKTokens:
+    """加载当前官方 SDK，并返回 create_account 所需的双 token。"""
+    ua = user_agent or DEFAULT_SENTINEL_USER_AGENT
+    descriptor = discover_official_sdk(session, user_agent=ua)
+    values = run_official_sdk(
+        descriptor=descriptor,
+        device_id=device_id,
+        flow=flow,
+        user_agent=ua,
+        proxy=proxy,
+        observer_wait_ms=max(DEFAULT_OBSERVER_WAIT_MS, int(observer_wait_ms or DEFAULT_OBSERVER_WAIT_MS)),
+    )
+    token = str(values.get("token") or "").strip()
+    so_token = str(values.get("so_token") or "").strip()
+    if not token:
+        raise RuntimeError("sentinel_sdk_token_missing")
+    if not so_token:
+        raise RuntimeError("sentinel_sdk_so_token_missing")
+    return SentinelSDKTokens(token=token, so_token=so_token, sdk_version=descriptor.version)
 
 
 def build_sentinel_token(

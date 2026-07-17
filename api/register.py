@@ -63,6 +63,11 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         return {"register": register_service.reset_outlook_pool(body.scope or "all")}
 
+    @router.post("/api/register/domain-health/reset")
+    async def reset_domain_health(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"register": register_service.reset_domain_health()}
+
     @router.get("/api/register/events")
     async def register_events(token: str = ""):
         require_admin(f"Bearer {token}")

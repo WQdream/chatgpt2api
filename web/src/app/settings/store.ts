@@ -12,6 +12,7 @@ import {
   fetchBackups,
   fetchRegisterConfig,
   resetRegister as resetRegisterApi,
+  resetRegisterDomainHealth as resetRegisterDomainHealthApi,
   resetOutlookPool as resetOutlookPoolApi,
   fetchSettingsConfig,
   runBackupNow,
@@ -334,6 +335,7 @@ type SettingsStore = {
   setRegisterTargetAvailable: (value: string) => void;
   setRegisterCheckInterval: (value: string) => void;
   setRegisterMailField: (key: "request_timeout" | "wait_timeout" | "wait_interval", value: string) => void;
+  setRegisterDomainHealthField: (key: "enabled" | "min_samples" | "min_success_rate", value: string | boolean) => void;
   addRegisterProvider: () => void;
   updateRegisterProvider: (index: number, updates: Record<string, unknown>) => void;
   deleteRegisterProvider: (index: number) => void;
@@ -341,6 +343,7 @@ type SettingsStore = {
   toggleRegister: () => Promise<void>;
   resetRegister: () => Promise<void>;
   resetOutlookPool: (scope: "all" | "failed" | "unused") => Promise<void>;
+  resetRegisterDomainHealth: () => Promise<void>;
 
   loadPools: (silent?: boolean) => Promise<void>;
   openAddDialog: () => void;
@@ -931,6 +934,29 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     } : {});
   },
 
+  setRegisterDomainHealthField: (key, value) => {
+    set((state) => {
+      if (!state.registerConfig) return {};
+      const current = state.registerConfig.mail.domain_health || {
+        enabled: true,
+        min_samples: 5,
+        min_success_rate: 20,
+      };
+      return {
+        registerConfig: {
+          ...state.registerConfig,
+          mail: {
+            ...state.registerConfig.mail,
+            domain_health: {
+              ...current,
+              [key]: key === "enabled" ? Boolean(value) : Number(value) || 0,
+            },
+          },
+        },
+      };
+    });
+  },
+
   addRegisterProvider: () => {
     set((state) => state.registerConfig ? {
       registerConfig: {
@@ -1039,6 +1065,19 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       toast.success(scope === "unused" ? "已清空未使用邮箱" : scope === "failed" ? "已清除失败/占用的邮箱状态" : "Outlook 邮箱池状态已全部重置");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "重置邮箱池状态失败");
+    } finally {
+      set({ isSavingRegister: false });
+    }
+  },
+
+  resetRegisterDomainHealth: async () => {
+    set({ isSavingRegister: true });
+    try {
+      const data = await resetRegisterDomainHealthApi();
+      set({ registerConfig: data.register });
+      toast.success("provider/domain 成功率统计已重置");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "重置域名成功率统计失败");
     } finally {
       set({ isSavingRegister: false });
     }

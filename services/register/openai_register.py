@@ -28,6 +28,11 @@ config = {
         "request_timeout": 30,
         "wait_timeout": 30,
         "wait_interval": 2,
+        "domain_health": {
+            "enabled": True,
+            "min_samples": 5,
+            "min_success_rate": 20.0,
+        },
         "providers": [],
     },
     "proxy": "",
@@ -245,7 +250,11 @@ def wait_for_code(mailbox: dict) -> str | None:
     return mail_provider.wait_for_code(_mail_config(), mailbox)
 
 
-from utils.sentinel import SentinelTokenGenerator, build_sentinel_token as _build_sentinel_token_tuple  # noqa: F401
+from utils.sentinel import (
+    SentinelTokenGenerator,
+    build_sentinel_token as _build_sentinel_token_tuple,
+    generate_official_sentinel_tokens,
+)  # noqa: F401
 
 
 def build_sentinel_token(session: requests.Session, device_id: str, flow: str) -> str:
@@ -430,6 +439,12 @@ class PlatformRegistrar:
             step(index, f"Cloudflare clearance 刷新失败：{self.clearance_failure_reason}", "yellow")
         return bundle
 
+    def _sentinel_proxy(self) -> str:
+        try:
+            return str(proxy_settings.get_profile(proxy=self.proxy, upstream=True).proxy_url or "").strip()
+        except Exception:
+            return self.proxy
+
     def _platform_authorize(self, email: str, index: int) -> None:
         step(index, "开始 platform authorize")
         self.session.cookies.set("oai-did", self.device_id, domain=".auth.openai.com")
@@ -446,7 +461,6 @@ class PlatformRegistrar:
             # 后续 user/register 落在错误的 auth step 上报 invalid_auth_step。
             "screen_hint": "signup",
             "max_age": "0",
-            "login_hint": email,
             "scope": "openid profile email offline_access",
             "response_type": "code",
             "response_mode": "query",
@@ -478,6 +492,46 @@ class PlatformRegistrar:
         # 仅打日志，不据此中断：authorize 落地页无法可靠区分注册/登录，
         # 真正的判定交给 user/register（失败会 dump 完整响应）。
         step(index, f"platform authorize 完成[{landed or '?'}] url={str(getattr(resp, 'url', '') or '')[:160]}")
+
+    def _continue_with_email(self, email: str, index: int) -> None:
+        """按浏览器流程在 authorize 会话内提交邮箱并推进 auth step。"""
+        step(index, "开始提交注册邮箱")
+        url = f"{auth_base}/api/accounts/authorize/continue"
+
+        def build_headers() -> dict[str, str]:
+            headers = self._json_headers(f"{auth_base}/log-in?usernameKind=email")
+            headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "authorize_continue")
+            return _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+
+        payload = {"username": {"kind": "email", "value": email}}
+        resp, error = request_with_local_retry(
+            self.session,
+            "post",
+            url,
+            json=payload,
+            headers=build_headers(),
+            allow_redirects=False,
+            verify=False,
+        )
+        if _is_cloudflare_challenge(resp):
+            bundle = self._refresh_cloudflare_clearance(auth_base, index)
+            if bundle is None:
+                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
+            resp, error = request_with_local_retry(
+                self.session,
+                "post",
+                url,
+                json=payload,
+                headers=build_headers(),
+                allow_redirects=False,
+                verify=False,
+            )
+            if _is_cloudflare_challenge(resp):
+                raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
+        if resp is None or resp.status_code != 200:
+            detail = _response_debug_detail(resp)
+            raise RuntimeError(error or f"authorize_continue_http_{getattr(resp, 'status_code', 'unknown')}, {detail}")
+        step(index, "提交注册邮箱完成")
 
     def _register_user(self, email: str, password: str, index: int) -> None:
         step(index, "开始提交注册密码")
@@ -536,22 +590,59 @@ class PlatformRegistrar:
     def _create_account(self, name: str, birthdate: str, index: int) -> None:
         step(index, "开始创建账号资料")
         url = f"{auth_base}/api/accounts/create_account"
-        headers = self._json_headers(f"{auth_base}/about-you")
-        headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "oauth_create_account")
-        headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+        sentinel_diagnostics: dict[str, Any] = {}
+
+        def build_headers() -> dict[str, str]:
+            sdk_tokens = generate_official_sentinel_tokens(
+                self.session,
+                self.device_id,
+                "oauth_create_account",
+                user_agent=self.clearance_user_agent or user_agent,
+                proxy=self._sentinel_proxy(),
+                observer_wait_ms=5000,
+            )
+            sentinel_diagnostics.update(
+                {
+                    "sdk_version": sdk_tokens.sdk_version,
+                    "token_length": len(sdk_tokens.token),
+                    "so_token_generated": bool(sdk_tokens.so_token),
+                }
+            )
+            step(
+                index,
+                "Sentinel SDK "
+                f"sdk_version={sentinel_diagnostics['sdk_version']}, "
+                f"token_length={sentinel_diagnostics['token_length']}, "
+                f"so_token_generated={sentinel_diagnostics['so_token_generated']}",
+            )
+            headers = self._json_headers(f"{auth_base}/about-you")
+            headers["OpenAI-Sentinel-Token"] = sdk_tokens.token
+            headers["OpenAI-Sentinel-SO-Token"] = sdk_tokens.so_token
+            return _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+
+        headers = build_headers()
         resp, error = request_with_local_retry(self.session, "post", url, json={"name": name, "birthdate": birthdate}, headers=headers, verify=False)
         if _is_cloudflare_challenge(resp):
             bundle = self._refresh_cloudflare_clearance(auth_base, index)
             if bundle is None:
                 raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
-            headers = self._json_headers(f"{auth_base}/about-you")
-            headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "oauth_create_account")
-            headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+            headers = build_headers()
             resp, error = request_with_local_retry(self.session, "post", url, json={"name": name, "birthdate": birthdate}, headers=headers, verify=False)
             if _is_cloudflare_challenge(resp):
                 raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
         if resp is None or resp.status_code not in (200, 302):
             data = _response_json(resp) if resp is not None else {}
+            nested_error = data.get("error") if isinstance(data.get("error"), dict) else {}
+            error_code = str(data.get("code") or nested_error.get("code") or "").strip()
+            if error_code == "registration_disallowed":
+                step(
+                    index,
+                    "create_account registration_disallowed，优先核对 Sentinel SDK 双 token: "
+                    f"sdk_version={sentinel_diagnostics.get('sdk_version', '')}, "
+                    f"token_length={sentinel_diagnostics.get('token_length', 0)}, "
+                    f"so_token_generated={sentinel_diagnostics.get('so_token_generated', False)}",
+                    "yellow",
+                )
             if data.get("message") == "Failed to create account. Please try again.":
                 step(index, "创建账号失败提示: 邮箱域名很可能因滥用被封禁，请更换邮箱域名", "yellow")
             detail = f", detail={json.dumps(data, ensure_ascii=False)}" if data else ""
@@ -582,6 +673,7 @@ class PlatformRegistrar:
             password = _random_password()
             first_name, last_name = _random_name()
             self._platform_authorize(email, index)
+            self._continue_with_email(email, index)
             self._register_user(email, password, index)
             self._send_otp(index)
             step(index, "开始等待注册验证码")
@@ -593,9 +685,9 @@ class PlatformRegistrar:
             self._create_account(f"{first_name} {last_name}", _random_birthdate(), index)
             tokens = self._exchange_registered_tokens(index)
         except Exception as error:
-            mail_provider.mark_mailbox_result(mailbox, success=False, error=error)
+            mail_provider.mark_mailbox_result(mailbox, success=False, error=error, mail_config=_mail_config())
             raise
-        mail_provider.mark_mailbox_result(mailbox, success=True)
+        mail_provider.mark_mailbox_result(mailbox, success=True, mail_config=_mail_config())
         return {
             "email": email,
             "password": password,
