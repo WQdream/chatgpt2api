@@ -18,7 +18,6 @@ from curl_cffi import requests
 
 
 from services.config import DATA_DIR
-from services.register.domain_health import domain_health_tracker, normalize_policy
 
 DDG_ALIASES_FILE = DATA_DIR / "ddg_aliases.json"
 _ddg_aliases_lock = Lock()
@@ -220,7 +219,6 @@ def _config(mail_config: dict) -> dict:
         "wait_interval": float(mail_config.get("wait_interval") or 2),
         "user_agent": str(mail_config.get("user_agent") or "Mozilla/5.0"),
         "proxy": str(mail_config.get("proxy") or "").strip(),
-        "domain_health_enabled": bool(normalize_policy(mail_config.get("domain_health"))["enabled"]),
     }
 
 
@@ -250,32 +248,6 @@ def _normalize_string_list(value: Any) -> list[str]:
         return [str(item).strip() for item in value if str(item).strip()]
     text = str(value or "").strip()
     return [text] if text else []
-
-
-class AutoDisabledMailboxDomainError(RuntimeError):
-    pass
-
-
-def _assign_health_domain(mailbox: dict, provider: Any) -> str:
-    """把动态子域名归一到 provider 实际配置的基础域名。"""
-    explicit = str(mailbox.get("base_domain") or mailbox.get("health_domain") or "").strip().lower().lstrip("@")
-    address = str(mailbox.get("address") or "").strip().lower()
-    actual = address.rsplit("@", 1)[1] if "@" in address else ""
-    candidates: list[str] = []
-    for value in _normalize_string_list(getattr(provider, "domain", [])):
-        normalized = value.lower().lstrip("@")
-        if normalized.startswith("*."):
-            normalized = normalized[2:]
-        if normalized:
-            candidates.append(normalized)
-    default_domain = str(getattr(provider, "default_domain", "") or "").strip().lower().lstrip("@")
-    if default_domain:
-        candidates.append(default_domain)
-    matching = [domain for domain in candidates if actual == domain or actual.endswith(f".{domain}")]
-    health_domain = explicit or (max(matching, key=len) if matching else actual)
-    if health_domain:
-        mailbox["health_domain"] = health_domain
-    return health_domain
 
 
 def _create_session(conf: dict):
@@ -1163,7 +1135,6 @@ class OutlookTokenProvider(BaseMailProvider):
             self.mode = "graph"
         self.imap_host = str(entry.get("imap_host") or OUTLOOK_DEFAULT_IMAP_HOST).strip() or OUTLOOK_DEFAULT_IMAP_HOST
         self.message_limit = max(1, int(entry.get("message_limit") or 10))
-        self.domain_health_enabled = bool(conf.get("domain_health_enabled", True))
         self.session = _create_session(conf)
 
     def close(self) -> None:
@@ -1207,21 +1178,7 @@ class OutlookTokenProvider(BaseMailProvider):
             raise RuntimeError("OutlookToken 邮箱池为空，请在邮箱配置中导入 email----password----client_id----refresh_token")
         with _outlook_token_state_lock:
             store = _load_outlook_token_state()
-            credential = next(
-                (
-                    item
-                    for item in self.pool
-                    if _outlook_entry_available(store.get(item["email"].strip().lower()))
-                    and (
-                        not self.domain_health_enabled
-                        or not domain_health_tracker.is_disabled(
-                            self.provider_ref,
-                            item["email"].strip().lower().rsplit("@", 1)[-1],
-                        )
-                    )
-                ),
-                None,
-            )
+            credential = next((item for item in self.pool if _outlook_entry_available(store.get(item["email"].strip().lower()))), None)
             if credential is None:
                 raise RuntimeError(f"[{self.label}] OutlookToken 邮箱池暂无可用邮箱（共 {len(self.pool)} 个，已用尽或全部占用/失效），请导入新邮箱或重置池状态")
             store[credential["email"].strip().lower()] = {"state": "in_use", "reason": "", "updated_at": datetime.now(timezone.utc).isoformat()}
@@ -1417,32 +1374,14 @@ def _entries(mail_config: dict) -> list[dict]:
         cnt = counters.get(t, 0) + 1
         counters[t] = cnt
         label = f"DDG-{cnt}" if t == "ddg_mail" else f"{t}#{idx}"
-        provider_id = str(item.get("provider_id") or "").strip() or f"legacy-{idx}"
-        result.append({**item, "provider_ref": f"{item['type']}#{provider_id}", "label": label})
+        result.append({**item, "provider_ref": f"{item['type']}#{idx}", "label": label})
     return result
 
 
 def _enabled_entries(mail_config: dict) -> list[dict]:
-    items: list[dict] = []
-    health_enabled = bool(normalize_policy(mail_config.get("domain_health"))["enabled"])
-    enabled_items = [item for item in _entries(mail_config) if item.get("enable")]
-    if not enabled_items:
-        raise RuntimeError("mail.providers 没有启用的 provider")
-    for raw_item in enabled_items:
-        item = dict(raw_item)
-        provider_ref = str(item.get("provider_ref") or item.get("type") or "")
-        configured_domains = _normalize_string_list(item.get("domain"))
-        if health_enabled and configured_domains:
-            available_domains = domain_health_tracker.filter_domains(provider_ref, configured_domains)
-            if not available_domains:
-                continue
-            item["domain"] = available_domains
-        default_domain = str(item.get("default_domain") or "").strip()
-        if health_enabled and default_domain and domain_health_tracker.is_disabled(provider_ref, default_domain):
-            continue
-        items.append(item)
+    items = [item for item in _entries(mail_config) if item.get("enable")]
     if not items:
-        raise RuntimeError("mail.providers 没有启用的 provider（域名成功率过低，已自动停用）")
+        raise RuntimeError("mail.providers 没有启用的 provider")
     return items
 
 
@@ -1576,18 +1515,10 @@ def create_mailbox(mail_config: dict, username: str | None = None) -> dict:
                 continue
             tried.add(provider_key)
             mailbox = provider.create_mailbox(username)
-            health_domain = _assign_health_domain(mailbox, provider)
-            health_enabled = bool(normalize_policy(mail_config.get("domain_health"))["enabled"])
-            if health_enabled and health_domain and domain_health_tracker.is_disabled(provider.provider_ref, health_domain):
-                if provider.name == OutlookTokenProvider.name:
-                    _release_outlook_token_state(str(mailbox.get("address") or ""))
-                raise AutoDisabledMailboxDomainError(
-                    f"[{provider.provider_ref}] 邮箱域名 {health_domain} 成功率过低，已自动停用"
-                )
             return mailbox
         except RuntimeError as error:
             last_error = str(error)
-            if not isinstance(error, AutoDisabledMailboxDomainError) and "DDG日上限已达" not in last_error:
+            if "DDG日上限已达" not in last_error:
                 raise
         finally:
             provider.close()
@@ -1602,25 +1533,12 @@ def wait_for_code(mail_config: dict, mailbox: dict) -> str | None:
         provider.close()
 
 
-def mark_mailbox_result(
-    mailbox: dict,
-    *,
-    success: bool,
-    error: Exception | str | None = None,
-    mail_config: dict | None = None,
-) -> None:
+def mark_mailbox_result(mailbox: dict, *, success: bool, error: Exception | str | None = None) -> None:
     """注册流程结束后更新邮箱池状态。
 
-    所有 provider 都记录 domain 成功率；outlook_token 额外维护邮箱池状态：成功标记 used，
-    失败时若是 token 失效标记 token_invalid，其余失败标记 failed。
+    仅对 outlook_token 邮箱生效：成功标记 used；失败时若是 token 失效标记 token_invalid，
+    其余失败标记 failed（保留邮箱占用以便排查，可通过重置释放）。
     """
-    policy = (mail_config or {}).get("domain_health") if isinstance(mail_config, dict) else None
-    try:
-        domain_health_tracker.record(mailbox, success=success, error=error, policy=policy)
-    except Exception:
-        # 统计是旁路能力；磁盘只读/空间不足时不影响已完成的注册和 token 保存。
-        pass
-
     if str(mailbox.get("provider") or "") != OutlookTokenProvider.name:
         return
     address = str(mailbox.get("address") or "").strip()

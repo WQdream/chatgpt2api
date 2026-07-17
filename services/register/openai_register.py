@@ -28,11 +28,6 @@ config = {
         "request_timeout": 30,
         "wait_timeout": 30,
         "wait_interval": 2,
-        "domain_health": {
-            "enabled": True,
-            "min_samples": 5,
-            "min_success_rate": 20.0,
-        },
         "providers": [],
     },
     "proxy": "",
@@ -685,9 +680,9 @@ class PlatformRegistrar:
             self._create_account(f"{first_name} {last_name}", _random_birthdate(), index)
             tokens = self._exchange_registered_tokens(index)
         except Exception as error:
-            mail_provider.mark_mailbox_result(mailbox, success=False, error=error, mail_config=_mail_config())
+            mail_provider.mark_mailbox_result(mailbox, success=False, error=error)
             raise
-        mail_provider.mark_mailbox_result(mailbox, success=True, mail_config=_mail_config())
+        mail_provider.mark_mailbox_result(mailbox, success=True)
         return {
             "email": email,
             "password": password,

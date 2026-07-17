@@ -11,7 +11,6 @@ from pathlib import Path
 from services.account_service import account_service
 from services.config import DATA_DIR
 from services.register import mail_provider, openai_register
-from services.register.domain_health import domain_health_tracker, normalize_policy
 
 
 REGISTER_FILE = DATA_DIR / "register.json"
@@ -52,19 +51,7 @@ def _normalize(raw: dict) -> dict:
     cfg["check_interval"] = max(1, int(cfg.get("check_interval") or 5))
     cfg["proxy"] = str(cfg.get("proxy") or "").strip()
     if isinstance(cfg.get("mail"), dict):
-        cfg["mail"] = dict(cfg["mail"])
         cfg["mail"].pop("proxy", None)
-        cfg["mail"]["domain_health"] = normalize_policy(cfg["mail"].get("domain_health"))
-        providers = cfg["mail"].get("providers")
-        if isinstance(providers, list):
-            normalized_providers: list = []
-            for provider in providers:
-                if not isinstance(provider, dict):
-                    continue
-                normalized_provider = dict(provider)
-                normalized_provider["provider_id"] = str(provider.get("provider_id") or uuid.uuid4().hex).strip()
-                normalized_providers.append(normalized_provider)
-            cfg["mail"]["providers"] = normalized_providers
     cfg["enabled"] = bool(cfg.get("enabled"))
     stats = {**_default_config()["stats"], **(raw.get("stats") if isinstance(raw.get("stats"), dict) else {}),
              "threads": cfg["threads"]}
@@ -96,11 +83,6 @@ class RegisterService:
     def get(self) -> dict:
         with self._lock:
             snapshot = json.loads(json.dumps({**self._config, "logs": self._logs[-300:]}, ensure_ascii=False))
-        mail = snapshot.get("mail") if isinstance(snapshot.get("mail"), dict) else {}
-        snapshot["domain_health"] = {
-            "policy": normalize_policy(mail.get("domain_health")),
-            "domains": domain_health_tracker.snapshot(),
-        }
         self._redact_outlook_pools(snapshot)
         return snapshot
 
@@ -239,12 +221,6 @@ class RegisterService:
                 f"已重置 Outlook 邮箱池状态（范围={'仅失败/占用' if scope == 'failed' else '全部'}），清除 {cleared} 条记录",
                 "yellow",
             )
-        return self.get()
-
-    def reset_domain_health(self) -> dict:
-        cleared = domain_health_tracker.reset()
-        with self._lock:
-            self._append_log(f"已重置邮箱 provider/domain 成功率统计，共清除 {cleared} 条记录", "yellow")
         return self.get()
 
     def _append_log(self, text: str, color: str = "") -> None:

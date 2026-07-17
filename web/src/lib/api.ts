@@ -351,11 +351,6 @@ export type RegisterConfig = {
     request_timeout: number;
     wait_timeout: number;
     wait_interval: number;
-    domain_health: {
-      enabled: boolean;
-      min_samples: number;
-      min_success_rate: number;
-    };
     providers: Array<Record<string, unknown>>;
   };
   proxy: string;
@@ -380,24 +375,6 @@ export type RegisterConfig = {
     started_at?: string;
     updated_at?: string;
     finished_at?: string;
-  };
-  domain_health?: {
-    policy: {
-      enabled: boolean;
-      min_samples: number;
-      min_success_rate: number;
-    };
-    domains: Array<{
-      provider: string;
-      provider_ref: string;
-      domain: string;
-      attempts: number;
-      success: number;
-      fail: number;
-      success_rate: number;
-      disabled: boolean;
-      updated_at: string;
-    }>;
   };
   logs?: Array<{
     time: string;
@@ -818,12 +795,6 @@ export async function resetOutlookPool(scope: "all" | "failed" | "unused" = "all
   return httpRequest<{ register: RegisterConfig }>("/api/register/outlook-pool/reset", {
     method: "POST",
     body: { scope },
-  });
-}
-
-export async function resetRegisterDomainHealth() {
-  return httpRequest<{ register: RegisterConfig }>("/api/register/domain-health/reset", {
-    method: "POST",
   });
 }
 

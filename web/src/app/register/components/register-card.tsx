@@ -171,7 +171,6 @@ export function RegisterCard() {
   const setTargetAvailable = useSettingsStore((state) => state.setRegisterTargetAvailable);
   const setCheckInterval = useSettingsStore((state) => state.setRegisterCheckInterval);
   const setMailField = useSettingsStore((state) => state.setRegisterMailField);
-  const setDomainHealthField = useSettingsStore((state) => state.setRegisterDomainHealthField);
   const addProvider = useSettingsStore((state) => state.addRegisterProvider);
   const updateProvider = useSettingsStore((state) => state.updateRegisterProvider);
   const deleteProvider = useSettingsStore((state) => state.deleteRegisterProvider);
@@ -179,7 +178,6 @@ export function RegisterCard() {
   const toggle = useSettingsStore((state) => state.toggleRegister);
   const reset = useSettingsStore((state) => state.resetRegister);
   const resetOutlookPool = useSettingsStore((state) => state.resetOutlookPool);
-  const resetDomainHealth = useSettingsStore((state) => state.resetRegisterDomainHealth);
 
   if (isLoading) {
     return (
@@ -194,8 +192,6 @@ export function RegisterCard() {
   const stats = config.stats || { success: 0, fail: 0, done: 0, running: 0, threads: config.threads };
   const providers = config.mail.providers || [];
   const logs = config.logs || [];
-  const domainHealthPolicy = config.mail.domain_health || { enabled: true, min_samples: 5, min_success_rate: 20 };
-  const domainHealthRows = config.domain_health?.domains || [];
   const updateProviderType = (index: number, type: string) => {
     updateProvider(index, {
       type,
@@ -301,21 +297,6 @@ export function RegisterCard() {
               <div className="space-y-2">
                 <label className="text-sm text-stone-700">轮询间隔</label>
                 <Input value={String(config.mail.wait_interval || "")} onChange={(event) => setMailField("wait_interval", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
-              </div>
-            </div>
-
-            <div className="grid gap-4 rounded-xl border border-stone-200 bg-stone-50/60 p-3 md:grid-cols-3">
-              <label className="flex items-center gap-3 text-sm text-stone-700">
-                <Checkbox checked={Boolean(domainHealthPolicy.enabled)} onCheckedChange={(checked) => setDomainHealthField("enabled", Boolean(checked))} disabled={config.enabled} />
-                自动停用低成功率域名
-              </label>
-              <div className="space-y-2">
-                <label className="text-sm text-stone-700">最少样本数</label>
-                <Input value={String(domainHealthPolicy.min_samples)} onChange={(event) => setDomainHealthField("min_samples", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm text-stone-700">最低成功率（%）</label>
-                <Input value={String(domainHealthPolicy.min_success_rate)} onChange={(event) => setDomainHealthField("min_success_rate", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
               </div>
             </div>
 
@@ -566,31 +547,6 @@ export function RegisterCard() {
             <div className="flex items-center gap-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
               <AlertTriangle className="size-4 shrink-0" />
               启动之前注意先保存配置。
-            </div>
-            <div className="rounded-xl border border-stone-200 bg-white/70 p-3">
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <div>
-                  <h3 className="text-sm font-semibold text-stone-900">邮箱 provider/domain 成功率</h3>
-                  <p className="mt-0.5 text-xs text-stone-500">达到最少样本且低于阈值的域名会自动停止分配。</p>
-                </div>
-                <Button type="button" variant="outline" className="h-8 rounded-lg border-stone-200 bg-white px-3 text-xs" onClick={() => void resetDomainHealth()} disabled={isSaving || config.enabled || domainHealthRows.length === 0}>
-                  重置统计
-                </Button>
-              </div>
-              {domainHealthRows.length === 0 ? (
-                <p className="text-xs text-stone-400">暂无域名样本</p>
-              ) : (
-                <div className="max-h-36 space-y-1 overflow-y-auto text-xs">
-                  {domainHealthRows.map((row) => (
-                    <div key={`${row.provider_ref}-${row.domain}`} className="grid grid-cols-[1fr_1.2fr_auto_auto] items-center gap-2 rounded-lg border border-stone-100 px-2 py-1.5">
-                      <span className="truncate text-stone-500" title={row.provider_ref}>{row.provider_ref}</span>
-                      <span className="truncate font-mono text-stone-700" title={row.domain}>{row.domain}</span>
-                      <span className="text-stone-600">{row.success}/{row.attempts} · {row.success_rate}%</span>
-                      <Badge variant={row.disabled ? "danger" : "secondary"} className="rounded-md">{row.disabled ? "已停用" : "观察中"}</Badge>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
         </div>
 
