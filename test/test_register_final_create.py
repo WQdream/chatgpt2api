@@ -6,7 +6,15 @@ from utils.sentinel import SentinelSDKTokens
 
 
 class FakeCookies:
+    def __init__(self):
+        self.values = {}
+        self.set_calls = []
+
     def set(self, *args, **kwargs):
+        name = args[0] if args else kwargs.get("name")
+        value = args[1] if len(args) > 1 else kwargs.get("value")
+        self.values[name] = value
+        self.set_calls.append((args, kwargs))
         return None
 
 
@@ -67,13 +75,14 @@ class RegisterFinalCreateTests(unittest.TestCase):
             token="sdk-sentinel-secret",
             so_token="sdk-so-secret",
             sdk_version="20260219f9f6",
+            oai_sc="sdk-oai-sc-secret",
         )
 
         def fake_request(session, method, url, **kwargs):
-            calls.append({"method": method, "url": url, **kwargs})
+            calls.append({"method": method, "url": url, "cookies": dict(session.cookies.values), **kwargs})
             return FakeResponse(data={"continue_url": "https://platform.openai.com/auth/callback?code=oauth-code"}), ""
 
-        with patch.object(openai_register, "generate_official_sentinel_tokens", return_value=tokens), patch.object(
+        with patch.object(openai_register, "build_sentinel_bundle", return_value=tokens), patch.object(
             openai_register,
             "request_with_local_retry",
             side_effect=fake_request,
@@ -83,13 +92,67 @@ class RegisterFinalCreateTests(unittest.TestCase):
         headers = calls[0]["headers"]
         self.assertEqual(headers["OpenAI-Sentinel-Token"], "sdk-sentinel-secret")
         self.assertEqual(headers["OpenAI-Sentinel-SO-Token"], "sdk-so-secret")
+        self.assertEqual(calls[0]["cookies"]["oai-sc"], "sdk-oai-sc-secret")
+        cookie_call = registrar.session.cookies.set_calls[-1]
+        self.assertEqual(cookie_call[1]["domain"], ".openai.com")
+        self.assertEqual(cookie_call[1]["path"], "/")
+        self.assertTrue(cookie_call[1]["secure"])
         joined_logs = "\n".join(logs)
         self.assertIn("sdk_version=20260219f9f6", joined_logs)
         self.assertIn("token_length=19", joined_logs)
         self.assertIn("so_token_generated=True", joined_logs)
+        self.assertIn("oai_sc_generated=True", joined_logs)
         self.assertNotIn("so_token_length", joined_logs)
         self.assertNotIn("sdk-sentinel-secret", joined_logs)
         self.assertNotIn("sdk-so-secret", joined_logs)
+        self.assertNotIn("sdk-oai-sc-secret", joined_logs)
+
+    def test_create_account_refreshes_sentinel_bundle_and_oai_sc_after_cloudflare(self):
+        registrar = self._registrar()
+        calls = []
+        first = SentinelSDKTokens(
+            token="first-combined-token",
+            so_token="first-so-token",
+            sdk_version="20260219f9f6",
+            oai_sc="first-oai-sc",
+        )
+        second = SentinelSDKTokens(
+            token="second-combined-token",
+            so_token="second-so-token",
+            sdk_version="20260219f9f6",
+            oai_sc="second-oai-sc",
+        )
+
+        def fake_request(session, method, url, **kwargs):
+            calls.append({"headers": dict(kwargs["headers"]), "oai_sc": session.cookies.values.get("oai-sc")})
+            return FakeResponse(), ""
+
+        with patch.object(
+            openai_register,
+            "build_sentinel_bundle",
+            side_effect=[first, second],
+        ) as build_bundle, patch.object(
+            openai_register,
+            "request_with_local_retry",
+            side_effect=fake_request,
+        ), patch.object(
+            openai_register,
+            "_is_cloudflare_challenge",
+            side_effect=[True, False],
+        ), patch.object(
+            registrar,
+            "_refresh_cloudflare_clearance",
+            return_value=object(),
+        ), patch.object(openai_register, "step"):
+            registrar._create_account("Example User", "2000-01-01", 1)
+
+        self.assertEqual(build_bundle.call_count, 2)
+        self.assertEqual(calls[0]["headers"]["OpenAI-Sentinel-Token"], "first-combined-token")
+        self.assertEqual(calls[0]["headers"]["OpenAI-Sentinel-SO-Token"], "first-so-token")
+        self.assertEqual(calls[0]["oai_sc"], "first-oai-sc")
+        self.assertEqual(calls[1]["headers"]["OpenAI-Sentinel-Token"], "second-combined-token")
+        self.assertEqual(calls[1]["headers"]["OpenAI-Sentinel-SO-Token"], "second-so-token")
+        self.assertEqual(calls[1]["oai_sc"], "second-oai-sc")
 
     def test_password_registration_uses_official_sdk_turnstile_token(self):
         registrar = self._registrar()
@@ -192,7 +255,7 @@ class RegisterFinalCreateTests(unittest.TestCase):
                 "message": "Sorry, we cannot create your account with the given information.",
             },
         )
-        with patch.object(openai_register, "generate_official_sentinel_tokens", return_value=tokens), patch.object(
+        with patch.object(openai_register, "build_sentinel_bundle", return_value=tokens), patch.object(
             openai_register,
             "request_with_local_retry",
             return_value=(response, ""),
@@ -241,7 +304,7 @@ class RegisterFinalCreateTests(unittest.TestCase):
             status_code=400,
             data={"message": "Failed to create account. Please try again."},
         )
-        with patch.object(openai_register, "generate_official_sentinel_tokens", return_value=tokens), patch.object(
+        with patch.object(openai_register, "build_sentinel_bundle", return_value=tokens), patch.object(
             openai_register,
             "request_with_local_retry",
             return_value=(response, ""),

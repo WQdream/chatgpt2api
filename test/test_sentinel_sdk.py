@@ -100,6 +100,7 @@ class OfficialSentinelSDKTests(unittest.TestCase):
             return {
                 "token": self._combined_token(),
                 "so_token": "so-value",
+                "oai_sc": "oai-sc-value",
                 "requirements": self._requirements(),
             }
 
@@ -118,6 +119,7 @@ class OfficialSentinelSDKTests(unittest.TestCase):
 
         self.assertEqual(result.token, self._combined_token())
         self.assertEqual(result.so_token, "so-value")
+        self.assertEqual(result.oai_sc, "oai-sc-value")
         self.assertEqual(result.sdk_version, "20260219f9f6")
         self.assertEqual(result.proof_token, "proof-value")
         self.assertEqual(result.turnstile_token, "turnstile-value")
@@ -126,6 +128,28 @@ class OfficialSentinelSDKTests(unittest.TestCase):
         self.assertEqual(runtime_calls[0]["observer_wait_ms"], 5000)
         self.assertEqual(runtime_calls[0]["device_id"], "device-id")
         self.assertEqual(runtime_calls[0]["proxy"], "http://127.0.0.1:7890")
+
+    def test_oauth_flow_rejects_missing_oai_sc_cookie(self):
+        descriptor = sentinel.SentinelSDKDescriptor(
+            version="20260219f9f6",
+            script_url="https://sentinel.openai.com/sentinel/20260219f9f6/sdk.js",
+        )
+        with patch.object(sentinel, "discover_official_sdk", return_value=descriptor), patch.object(
+            sentinel,
+            "run_official_sdk",
+            return_value={
+                "token": self._combined_token(),
+                "so_token": "so-value",
+                "oai_sc": "",
+                "requirements": self._requirements(),
+            },
+        ):
+            with self.assertRaisesRegex(RuntimeError, "oai_sc_missing"):
+                sentinel.build_sentinel_bundle(
+                    FakeSession(),
+                    "device-id",
+                    "oauth_create_account",
+                )
 
     def test_generate_rejects_missing_so_token(self):
         descriptor = sentinel.SentinelSDKDescriptor(
@@ -305,6 +329,7 @@ class OfficialSentinelSDKTests(unittest.TestCase):
         self.assertGreater(len(result.proof_token), 100)
         self.assertGreater(len(result.turnstile_token), 100)
         self.assertGreater(len(result.challenge_token), 100)
+        self.assertGreater(len(result.oai_sc), 100)
         self.assertTrue(result.requirements["proof"])
         self.assertTrue(result.requirements["turnstile"])
         self.assertTrue(result.requirements["so"])

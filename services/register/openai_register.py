@@ -247,6 +247,7 @@ def wait_for_code(mailbox: dict) -> str | None:
 
 from utils.sentinel import (
     SentinelTokenGenerator,
+    build_sentinel_bundle,
     build_sentinel_token as _build_sentinel_token_tuple,
     generate_official_sentinel_tokens,
 )  # noqa: F401
@@ -606,7 +607,7 @@ class PlatformRegistrar:
         sentinel_diagnostics: dict[str, Any] = {}
 
         def build_headers() -> dict[str, str]:
-            sdk_tokens = generate_official_sentinel_tokens(
+            sdk_tokens = build_sentinel_bundle(
                 self.session,
                 self.device_id,
                 "oauth_create_account",
@@ -623,8 +624,17 @@ class PlatformRegistrar:
                     "t_length": len(sdk_tokens.turnstile_token),
                     "c_length": len(sdk_tokens.challenge_token),
                     "so_token_generated": bool(sdk_tokens.so_token),
+                    "oai_sc_generated": bool(sdk_tokens.oai_sc),
                 }
             )
+            if sdk_tokens.oai_sc:
+                self.session.cookies.set(
+                    "oai-sc",
+                    sdk_tokens.oai_sc,
+                    domain=".openai.com",
+                    path="/",
+                    secure=True,
+                )
             step(
                 index,
                 "Sentinel SDK "
@@ -634,11 +644,13 @@ class PlatformRegistrar:
                 f"p_length={sentinel_diagnostics['p_length']}, "
                 f"t_length={sentinel_diagnostics['t_length']}, "
                 f"c_length={sentinel_diagnostics['c_length']}, "
-                f"so_token_generated={sentinel_diagnostics['so_token_generated']}",
+                f"so_token_generated={sentinel_diagnostics['so_token_generated']}, "
+                f"oai_sc_generated={sentinel_diagnostics['oai_sc_generated']}",
             )
             headers = self._json_headers(f"{auth_base}/about-you")
             headers["OpenAI-Sentinel-Token"] = sdk_tokens.token
-            headers["OpenAI-Sentinel-SO-Token"] = sdk_tokens.so_token
+            if sdk_tokens.so_token:
+                headers["OpenAI-Sentinel-SO-Token"] = sdk_tokens.so_token
             return _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
 
         headers = build_headers()
@@ -665,7 +677,8 @@ class PlatformRegistrar:
                     f"p_length={sentinel_diagnostics.get('p_length', 0)}, "
                     f"t_length={sentinel_diagnostics.get('t_length', 0)}, "
                     f"c_length={sentinel_diagnostics.get('c_length', 0)}, "
-                    f"so_token_generated={sentinel_diagnostics.get('so_token_generated', False)}",
+                    f"so_token_generated={sentinel_diagnostics.get('so_token_generated', False)}, "
+                    f"oai_sc_generated={sentinel_diagnostics.get('oai_sc_generated', False)}",
                     "yellow",
                 )
             detail = f", detail={json.dumps(data, ensure_ascii=False)}" if data else ""

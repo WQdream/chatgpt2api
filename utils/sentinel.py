@@ -117,6 +117,7 @@ class SentinelSDKTokens:
     token: str
     so_token: str
     sdk_version: str
+    oai_sc: str = ""
     proof_token: str = ""
     turnstile_token: str = ""
     challenge_token: str = ""
@@ -292,9 +293,19 @@ def run_official_sdk(
                 page.goto(SENTINEL_RUNTIME_URL, wait_until="load", timeout=SENTINEL_BROWSER_TIMEOUT_MS)
                 page.wait_for_function("typeof SentinelSDK !== 'undefined'", timeout=SENTINEL_BROWSER_TIMEOUT_MS)
                 result = page.evaluate(expression)
+                oai_sc = next(
+                    (
+                        str(cookie.get("value") or "")
+                        for cookie in context.cookies()
+                        if cookie.get("name") == "oai-sc"
+                        and str(cookie.get("domain") or "").lstrip(".").endswith("openai.com")
+                    ),
+                    "",
+                )
                 return {
                     "token": str((result or {}).get("token") or ""),
                     "so_token": str((result or {}).get("so_token") or ""),
+                    "oai_sc": oai_sc,
                     "requirements": requirements,
                 }
             finally:
@@ -393,6 +404,7 @@ def generate_official_sentinel_tokens(
     )
     token = str(values.get("token") or "").strip()
     so_token = str(values.get("so_token") or "").strip()
+    oai_sc = str(values.get("oai_sc") or "").strip()
     if not token:
         raise RuntimeError("sentinel_sdk_token_missing")
     try:
@@ -411,16 +423,38 @@ def generate_official_sentinel_tokens(
     _require_valid_sdk_value("turnstile_token", turnstile_token, required=requirements["turnstile"])
     _require_valid_sdk_value("challenge_token", challenge_token, required=True)
     _require_valid_sdk_value("so_token", so_token, required=requirements["so"])
+    _require_valid_sdk_value("oai_sc", oai_sc, required=flow == "oauth_create_account")
 
     return SentinelSDKTokens(
         token=token,
         so_token=so_token,
         sdk_version=descriptor.version,
+        oai_sc=oai_sc,
         proof_token=proof_token,
         turnstile_token=turnstile_token,
         challenge_token=challenge_token,
         requirements=requirements,
         runtime_mode="chromium",
+    )
+
+
+def build_sentinel_bundle(
+    session: "Session",
+    device_id: str,
+    flow: str,
+    *,
+    user_agent: str = "",
+    proxy: str = "",
+    observer_wait_ms: int = DEFAULT_OBSERVER_WAIT_MS,
+) -> SentinelSDKTokens:
+    """返回官方 SDK 生成的 Sentinel header、SO header 与 oai-sc cookie bundle。"""
+    return generate_official_sentinel_tokens(
+        session,
+        device_id,
+        flow,
+        user_agent=user_agent,
+        proxy=proxy,
+        observer_wait_ms=observer_wait_ms,
     )
 
 
